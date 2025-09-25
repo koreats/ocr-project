@@ -7,10 +7,9 @@ import easyocr
 import time
 import textwrap
 import json
-from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout, QWidget, QDialog, QFormLayout, QLineEdit, QCheckBox, QDialogButtonBox, QMessageBox
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QDialog, QFormLayout, QLineEdit, QCheckBox, QDialogButtonBox, QMessageBox, QFileDialog
+from PyQt6.QtGui import QGuiApplication
 
-# --- Global flag for shutdown ---
 is_running = True
 
 def find_capture_device():
@@ -62,7 +61,6 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("설정")
         self.config = config.copy()
         self.layout = QFormLayout(self)
-
         self.widgets = {}
         descriptions = {
             'ocr_languages': "OCR 언어 (쉼표로 구분, 예: ko,en) *재시작 필요",
@@ -73,7 +71,6 @@ class SettingsDialog(QDialog):
             'user_cooldown_seconds': "캡처 성공 후, 다음 움직임을 감지하기까지의 최소 대기 시간 (초)",
             'text_wrap_width': "결과 텍스트의 한 줄 최대 글자 수"
         }
-
         for key, value in self.config.items():
             frame = QWidget()
             row_layout = QVBoxLayout(frame)
@@ -94,7 +91,6 @@ class SettingsDialog(QDialog):
             row_layout.addWidget(desc_label)
             self.widgets[key] = widget
             self.layout.addRow(frame)
-
         self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         self.buttonBox.accepted.connect(self.on_save)
         self.buttonBox.rejected.connect(self.reject)
@@ -109,10 +105,8 @@ class SettingsDialog(QDialog):
             else:
                 try: self.config[key] = int(widget.text())
                 except ValueError: self.config[key] = float(widget.text())
-        
         with open("config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=4)
-        
         QMessageBox.information(self, "저장 완료", "설정이 저장되었습니다. 일부 설정은 프로그램을 재시작해야 적용됩니다.")
         super().accept()
 
@@ -122,29 +116,59 @@ class MainWindow(QMainWindow):
         self.config = config
         self.setWindowTitle("OCR 결과")
         self.setGeometry(100, 100, 700, 500)
-
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
-
         self.text_area = QTextEdit()
         self.text_area.setReadOnly(True)
         self.text_area.setFontPointSize(14)
         layout.addWidget(self.text_area)
-
-        settings_button = QPushButton("설정")
-        settings_button.clicked.connect(self.open_settings)
-        layout.addWidget(settings_button)
+        button_layout = QHBoxLayout()
+        self.copy_button = QPushButton("클립보드로 복사")
+        self.clear_button = QPushButton("내용 지우기")
+        self.save_as_button = QPushButton("파일로 저장")
+        self.settings_button = QPushButton("설정")
+        button_layout.addWidget(self.copy_button)
+        button_layout.addWidget(self.clear_button)
+        button_layout.addWidget(self.save_as_button)
+        button_layout.addStretch()
+        button_layout.addWidget(self.settings_button)
+        layout.addLayout(button_layout)
+        self.copy_button.clicked.connect(self.copy_to_clipboard)
+        self.clear_button.clicked.connect(self.clear_text)
+        self.save_as_button.clicked.connect(self.save_as)
+        self.settings_button.clicked.connect(self.open_settings)
 
     def add_text(self, text):
         self.text_area.append(text)
         self.text_area.verticalScrollBar().setValue(self.text_area.verticalScrollBar().maximum())
 
+    def copy_to_clipboard(self):
+        clipboard = QGuiApplication.clipboard()
+        clipboard.setText(self.text_area.toPlainText())
+        print("UI 창의 내용이 클립보드에 복사되었습니다.")
+
+    def clear_text(self):
+        self.text_area.clear()
+
+    def save_as(self):
+        text_to_save = self.text_area.toPlainText()
+        if not text_to_save:
+            QMessageBox.warning(self, "경고", "저장할 내용이 없습니다.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "파일로 저장", "", "Text Files (*.txt)")
+        if path:
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(text_to_save)
+                QMessageBox.information(self, "성공", f"파일이 성공적으로 저장되었습니다: {path}")
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"파일 저장 중 오류가 발생했습니다: {e}")
+
     def open_settings(self):
         dialog = SettingsDialog(self.config, self)
         if dialog.exec():
-            print("설정 변경이 감지되었습니다. config.json 파일을 확인하세요.")
-            # Reload config by restarting or dynamically applying
+            print("설정 변경이 감지되었습니다. 적용을 위해 프로그램을 재시작하세요.")
             self.config = dialog.config
 
     def closeEvent(self, event):
@@ -155,7 +179,8 @@ class MainWindow(QMainWindow):
 def main():
     global is_running
     try:
-        with open("config.json", "r", encoding="utf-8") as f: config = json.load(f)
+        with open("config.json", "r", encoding="utf-8") as f:
+            config = json.load(f)
     except FileNotFoundError:
         config = {
             "ocr_languages": ["ko", "en"], "gpu_enabled": True, "motion_threshold": 0.1,

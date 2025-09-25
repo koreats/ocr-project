@@ -1,0 +1,9 @@
+{
+    "ocr_languages": ["ko", "en"],
+    "gpu_enabled": true,
+    "motion_threshold": 0.1,
+    "stabilization_delay_seconds": 0.5,
+    "stability_threshold_frames": 5,
+    "user_cooldown_seconds": 0.4,
+    "text_wrap_width": 70
+}
