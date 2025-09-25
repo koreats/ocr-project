@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QPushButton, Q
 from PyQt6.QtGui import QGuiApplication
 
 is_running = True
+main_config = {}
 
 def find_capture_device():
     for i in range(3):
@@ -20,7 +21,23 @@ def find_capture_device():
             return cap
     return None
 
-def post_process_text(ocr_result, wrapper):
+def load_corrections(filepath):
+    correction_dict = {}
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    parts = line.split(',')
+                    if len(parts) == 2:
+                        error, correction = parts
+                        correction_dict[error.strip()] = correction.strip()
+        print(f"'{filepath}'에서 {len(correction_dict)}개의 교정 규칙을 로드했습니다.")
+    except FileNotFoundError:
+        print(f"경고: 교정 파일('{filepath}')을 찾을 수 없습니다. 오타 교정 없이 진행합니다.")
+    return correction_dict
+
+def post_process_text(ocr_result, wrapper, correction_dict):
     paragraphs = []
     current_paragraph = ""
     for item in ocr_result:
@@ -31,10 +48,18 @@ def post_process_text(ocr_result, wrapper):
             current_paragraph = ""
     if current_paragraph:
         paragraphs.append(current_paragraph.strip())
-    wrapped_paragraphs = [wrapper.fill(p) for p in paragraphs]
+    
+    corrected_paragraphs = []
+    for p in paragraphs:
+        for error, correction in correction_dict.items():
+            p = p.replace(error, correction)
+        corrected_paragraphs.append(p)
+
+    wrapper.width = main_config.get('text_wrap_width', 70)
+    wrapped_paragraphs = [wrapper.fill(p) for p in corrected_paragraphs]
     return "\n\n".join(wrapped_paragraphs)
 
-def ocr_worker(job_q, result_q, reader, wrapper):
+def ocr_worker(job_q, result_q, reader, wrapper, correction_dict):
     while True:
         try:
             frame = job_q.get(timeout=1)
@@ -44,7 +69,7 @@ def ocr_worker(job_q, result_q, reader, wrapper):
                 if not result:
                     result_q.put("[No text found]")
                     continue
-                formatted_text = post_process_text(result, wrapper)
+                formatted_text = post_process_text(result, wrapper, correction_dict)
                 result_q.put(formatted_text)
             except Exception as e:
                 print(f"EasyOCR 작업 중 오류 발생: {e}")
@@ -128,11 +153,8 @@ class MainWindow(QMainWindow):
         self.clear_button = QPushButton("내용 지우기")
         self.save_as_button = QPushButton("파일로 저장")
         self.settings_button = QPushButton("설정")
-        button_layout.addWidget(self.copy_button)
-        button_layout.addWidget(self.clear_button)
-        button_layout.addWidget(self.save_as_button)
-        button_layout.addStretch()
-        button_layout.addWidget(self.settings_button)
+        button_layout.addWidget(self.copy_button); button_layout.addWidget(self.clear_button); button_layout.addWidget(self.save_as_button);
+        button_layout.addStretch(); button_layout.addWidget(self.settings_button)
         layout.addLayout(button_layout)
         self.copy_button.clicked.connect(self.copy_to_clipboard)
         self.clear_button.clicked.connect(self.clear_text)
@@ -145,31 +167,28 @@ class MainWindow(QMainWindow):
 
     def copy_to_clipboard(self):
         clipboard = QGuiApplication.clipboard()
-        clipboard.setText(self.text_area.toPlainText())
-        print("UI 창의 내용이 클립보드에 복사되었습니다.")
+        clipboard.setText(self.text_area.toPlainText()); print("UI 창의 내용이 클립보드에 복사되었습니다.")
 
     def clear_text(self):
         self.text_area.clear()
 
     def save_as(self):
         text_to_save = self.text_area.toPlainText()
-        if not text_to_save:
-            QMessageBox.warning(self, "경고", "저장할 내용이 없습니다.")
-            return
+        if not text_to_save: QMessageBox.warning(self, "경고", "저장할 내용이 없습니다."); return
         path, _ = QFileDialog.getSaveFileName(self, "파일로 저장", "", "Text Files (*.txt)")
         if path:
             try:
-                with open(path, 'w', encoding='utf-8') as f:
-                    f.write(text_to_save)
+                with open(path, 'w', encoding='utf-8') as f: f.write(text_to_save)
                 QMessageBox.information(self, "성공", f"파일이 성공적으로 저장되었습니다: {path}")
             except Exception as e:
                 QMessageBox.critical(self, "오류", f"파일 저장 중 오류가 발생했습니다: {e}")
 
     def open_settings(self):
-        dialog = SettingsDialog(self.config, self)
+        global main_config
+        dialog = SettingsDialog(main_config, self)
         if dialog.exec():
-            print("설정 변경이 감지되었습니다. 적용을 위해 프로그램을 재시작하세요.")
-            self.config = dialog.config
+            main_config = dialog.config
+            print("설정 변경이 감지되었습니다. 일부 설정은 재시작 시 적용됩니다.")
 
     def closeEvent(self, event):
         global is_running
@@ -177,19 +196,20 @@ class MainWindow(QMainWindow):
         event.accept()
 
 def main():
-    global is_running
+    global is_running, main_config
     try:
-        with open("config.json", "r", encoding="utf-8") as f:
-            config = json.load(f)
+        with open("config.json", "r", encoding="utf-8") as f: main_config = json.load(f)
     except FileNotFoundError:
-        config = {
+        main_config = {
             "ocr_languages": ["ko", "en"], "gpu_enabled": True, "motion_threshold": 0.1,
             "stabilization_delay_seconds": 0.5, "stability_threshold_frames": 5,
             "user_cooldown_seconds": 0.4, "text_wrap_width": 70
         }
+    
+    correction_dict = load_corrections("corrections.txt")
 
     app = QApplication(sys.argv)
-    main_window = MainWindow(config)
+    main_window = MainWindow(main_config)
     main_window.show()
 
     cap = find_capture_device()
@@ -208,12 +228,12 @@ def main():
     print(f"관심 영역 선택 완료: x={roi_x}, y={roi_y}, w={roi_w}, h={roi_h}")
 
     print("EasyOCR 모델을 로드하는 중입니다...")
-    reader = easyocr.Reader(config['ocr_languages'], gpu=config['gpu_enabled'])
+    reader = easyocr.Reader(main_config['ocr_languages'], gpu=main_config['gpu_enabled'])
     print(f"EasyOCR 모델 로드 완료. [실행 장치: {reader.device}]")
 
-    wrapper = textwrap.TextWrapper(width=config['text_wrap_width'], break_long_words=False, replace_whitespace=False)
+    wrapper = textwrap.TextWrapper(width=main_config['text_wrap_width'], break_long_words=False, replace_whitespace=False)
     job_queue = queue.Queue(); result_queue = queue.Queue()
-    ocr_thread = threading.Thread(target=ocr_worker, args=(job_queue, result_queue, reader, wrapper), daemon=True); ocr_thread.start()
+    ocr_thread = threading.Thread(target=ocr_worker, args=(job_queue, result_queue, reader, wrapper, correction_dict), daemon=True); ocr_thread.start()
 
     window_title = "OCR Application"; cv2.namedWindow(window_title)
 
@@ -253,19 +273,19 @@ def main():
                     diff = cv2.absdiff(previous_frame_gray, gray)
                     mean_diff = np.mean(diff)
 
-                    if mean_diff > config['motion_threshold'] and not is_flipping and (time.time() - last_capture_time > config['user_cooldown_seconds']):
+                    if mean_diff > main_config['motion_threshold'] and not is_flipping and (time.time() - last_capture_time > main_config['user_cooldown_seconds']):
                         status = "Flipping..."; is_flipping = True; stabilizing_since = None
 
                     if is_flipping:
                         if mean_diff == 0.0:
                             if stabilizing_since is None: stabilizing_since = time.time(); status = "Stabilizing..."
                         else: stabilizing_since = None; status = "Flipping..."
-                        if stabilizing_since is not None and (time.time() - stabilizing_since > config['stabilization_delay_seconds']):
+                        if stabilizing_since is not None and (time.time() - stabilizing_since > main_config['stabilization_delay_seconds']):
                             roi_to_ocr = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
                             job_queue.put(roi_to_ocr.copy()); status = "OCR Queued"; is_flipping = False; stabilizing_since = None
 
                     if not is_flipping and status not in ["Saved!", "OCR Queued"]: status = "Ready"
-                    elif status == "Saved!" and (time.time() - last_capture_time > config['user_cooldown_seconds']):
+                    elif status == "Saved!" and (time.time() - last_capture_time > main_config['user_cooldown_seconds']):
                         status = "Ready"
 
                 cv2.putText(frame, f"Status: {status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, STATUS_COLORS.get(status, (0,0,255)), 2, cv2.LINE_AA)
