@@ -59,28 +59,18 @@ def post_process_text(ocr_result, wrapper, correction_dict):
 def ocr_worker(job_q, result_q, reader, wrapper, correction_dict):
     while True:
         try:
-            # Wait for a job. The timeout allows the thread to periodically check the is_running flag.
             frame = job_q.get(timeout=1)
         except queue.Empty:
-            if not is_running:
-                break # Exit if the main app is closing
-            continue # Otherwise, continue waiting for a job
-
-        # If we get here, we have a job from the queue
+            if not is_running: break
+            continue
         try:
-            if frame is None: # Shutdown signal
-                break
-
-            # Perform OCR
+            if frame is None: break
             result = reader.readtext(frame)
             formatted_text = post_process_text(result, wrapper, correction_dict) if result else "[No text found]"
             result_q.put(formatted_text)
-
         except Exception as e:
-            print(f"EasyOCR 작업 중 오류 발생: {e}")
             result_q.put(f"[OCR Error: {e}]")
         finally:
-            # Signal that the task from the queue is done
             job_q.task_done()
 
 class ModeSelectionDialog(QDialog):
@@ -143,7 +133,7 @@ class MainWindow(QMainWindow):
     def __init__(self, config, mode):
         super().__init__()
         self.config = config; self.mode = mode
-        self.pdf_saved_this_session = False # Flag to track manual PDF save
+        self.pdf_saved_this_session = False
         self.setWindowTitle("OCR Application")
         self.setGeometry(100, 100, 800, 600)
         central_widget = QWidget(); self.setCentralWidget(central_widget)
@@ -165,11 +155,8 @@ class MainWindow(QMainWindow):
         self.update_ui_for_mode()
 
     def update_ui_for_mode(self):
-        if self.mode == 'ocr':
-            self.pdf_button.setEnabled(False)
-        else: # image mode
-            self.copy_button.setEnabled(False)
-            self.save_as_button.setEnabled(False)
+        if self.mode == 'ocr': self.pdf_button.setEnabled(False)
+        else: self.copy_button.setEnabled(False); self.save_as_button.setEnabled(False)
 
     def add_ocr_text(self, text): self.ocr_results_area.append(text); self.ocr_results_area.verticalScrollBar().setValue(self.ocr_results_area.verticalScrollBar().maximum())
     def add_log(self, text): self.log_area.append(text); self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
@@ -183,8 +170,7 @@ class MainWindow(QMainWindow):
             try:
                 with open(path, 'w', encoding='utf-8') as f: f.write(text_to_save)
                 self.add_log(f"파일이 성공적으로 저장되었습니다: {path}")
-            except Exception as e:
-                self.add_log(f"파일 저장 중 오류가 발생했습니다: {e}")
+            except Exception as e: self.add_log(f"파일 저장 중 오류가 발생했습니다: {e}")
 
     def open_settings(self):
         global main_config
@@ -196,11 +182,9 @@ class MainWindow(QMainWindow):
     def compile_to_pdf(self):
         self.add_log("PDF 생성을 시작합니다...")
         image_folder = 'captures'
-        if not os.path.exists(image_folder):
-             self.add_log(f"경고: '{image_folder}' 폴더를 찾을 수 없습니다."); return
+        if not os.path.exists(image_folder): self.add_log(f"경고: '{image_folder}' 폴더를 찾을 수 없습니다."); return
         image_files = sorted([os.path.join(image_folder, f) for f in os.listdir(image_folder) if f.endswith('.png')])
-        if not image_files:
-            QMessageBox.warning(self, "경고", "PDF로 만들 이미지가 captures 폴더에 없습니다."); return
+        if not image_files: QMessageBox.warning(self, "경고", "PDF로 만들 이미지가 captures 폴더에 없습니다."); return
         path, _ = QFileDialog.getSaveFileName(self, "PDF로 저장", "output.pdf", "PDF Files (*.pdf)")
         if path:
             try:
@@ -208,9 +192,8 @@ class MainWindow(QMainWindow):
                 if pil_images:
                     pil_images[0].save(path, save_all=True, append_images=pil_images[1:])
                     self.add_log(f"PDF 파일이 성공적으로 저장되었습니다: {path}")
-                    self.pdf_saved_this_session = True # Set the flag
-            except Exception as e:
-                self.add_log(f"PDF 생성 중 오류가 발생했습니다: {e}")
+                    self.pdf_saved_this_session = True
+            except Exception as e: self.add_log(f"PDF 생성 중 오류가 발생했습니다: {e}")
 
     def closeEvent(self, event):
         global is_running
@@ -238,16 +221,13 @@ def process_pdf_mode(config, app):
         output_filename = os.path.splitext(os.path.basename(path))[0] + "_output.txt"
         with open(output_filename, "w", encoding="utf-8") as f: f.write(full_text)
         QMessageBox.information(None, "처리 완료", f"PDF 처리가 완료되었습니다!\n결과가 '{output_filename}' 파일에 저장되었습니다.")
-    except Exception as e:
-        QMessageBox.critical(None, "오류", f"PDF 처리 중 오류가 발생했습니다: {e}")
-    finally:
-        main_window.close()
+    except Exception as e: QMessageBox.critical(None, "오류", f"PDF 처리 중 오류가 발생했습니다: {e}")
+    finally: main_window.close()
 
 def live_capture_mode(config, mode, app):
     global is_running, main_config
     main_config = config
-    main_window = MainWindow(config, mode)
-    main_window.show()
+    main_window = MainWindow(config, mode); main_window.show()
     main_window.add_log("실시간 캡처 모드로 시작합니다.")
     cap = find_capture_device()
     if cap is None: main_window.add_log("오류: 캡처 장치를 찾을 수 없습니다."); return
@@ -255,7 +235,7 @@ def live_capture_mode(config, mode, app):
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     ret, first_frame = cap.read()
     if not ret: main_window.add_log("오류: 카메라 프레임을 읽을 수 없습니다."); return
-    roi_text_img = first_frame.copy(); cv2.putText(roi_text_img, "Draw ROI and Press ENTER (or c to cancel)", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+    roi_text_img = first_frame.copy(); cv2.putText(roi_text_img, "Draw ROI and Press ENTER", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
     roi = cv2.selectROI("ROI 선택", roi_text_img, fromCenter=False, showCrosshair=True)
     cv2.destroyWindow("ROI 선택")
     roi_x, roi_y, roi_w, roi_h = [int(c) for c in roi]
@@ -280,6 +260,8 @@ def live_capture_mode(config, mode, app):
             while is_running:
                 ret, frame = cap.read();
                 if not ret: break
+                # First, crop a clean copy of the ROI before drawing on the main frame
+                clean_roi_frame = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w].copy()
                 cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 0), 2)
                 if mode == 'ocr':
                     try:
@@ -293,8 +275,7 @@ def live_capture_mode(config, mode, app):
                         result_queue.task_done()
                     except queue.Empty:
                         pass
-                roi_frame_for_diff = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
-                gray = cv2.cvtColor(roi_frame_for_diff, cv2.COLOR_BGR2GRAY); gray = cv2.GaussianBlur(gray, (21, 21), 0)
+                gray = cv2.cvtColor(clean_roi_frame, cv2.COLOR_BGR2GRAY); gray = cv2.GaussianBlur(gray, (21, 21), 0)
                 if previous_frame_gray is not None:
                     diff = cv2.absdiff(previous_frame_gray, gray); mean_diff = np.mean(diff)
                     if mean_diff > config['motion_threshold'] and not is_flipping and (time.time() - last_capture_time > config['user_cooldown_seconds']):
@@ -304,13 +285,12 @@ def live_capture_mode(config, mode, app):
                             if stabilizing_since is None: stabilizing_since = time.time(); status = "Stabilizing..."
                         else: stabilizing_since = None; status = "Flipping..."
                         if stabilizing_since is not None and (time.time() - stabilizing_since > config['stabilization_delay_seconds']):
-                            roi_to_capture = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
                             if mode == 'ocr':
-                                job_queue.put(roi_to_capture.copy()); status = "OCR Queued"
+                                job_queue.put(clean_roi_frame.copy()); status = "OCR Queued"
                             else:
                                 page_counter += 1
                                 filename = f"captures/capture_{page_counter:04d}.png"
-                                cv2.imwrite(filename, roi_to_capture)
+                                cv2.imwrite(filename, clean_roi_frame)
                                 saved_image_paths.append(filename)
                                 main_window.add_ocr_text(f"{filename}")
                                 main_window.add_log(f"이미지 저장됨: {filename}")
