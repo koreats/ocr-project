@@ -37,8 +37,14 @@ def main():
     print(f"현재 해상도: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
 
     print("EasyOCR 모델을 로드하는 중입니다...")
-    reader = easyocr.Reader(['ko', 'en'])
+    reader = easyocr.Reader(['ko', 'en'], gpu=True)
     print("EasyOCR 모델 로드 완료.")
+    device_info = reader.device
+    print(f"EasyOCR 실행 장치: {device_info}")
+    if "mps" in device_info or "cuda" in device_info:
+        print("--> GPU 가속이 활성화되었습니다.")
+    else:
+        print("--> CPU를 사용하여 실행 중입니다.")
 
     job_queue = queue.Queue()
     result_queue = queue.Queue()
