@@ -95,7 +95,7 @@ def main():
     mean_diff = 0.0
     last_capture_time = 0
     stabilizing_since = None
-    COOLDOWN_SECONDS = 1.5
+    USER_COOLDOWN = 0.4 # Reduced from 1.5 for faster cycle
     STABILIZATION_DELAY = 0.5
 
     STATUS_COLORS = {
@@ -131,7 +131,7 @@ def main():
                     diff = cv2.absdiff(previous_frame_gray, gray)
                     mean_diff = np.mean(diff)
 
-                    if mean_diff > 0.1 and not is_flipping and (time.time() - last_capture_time > COOLDOWN_SECONDS):
+                    if mean_diff > 0.1 and not is_flipping and (time.time() - last_capture_time > USER_COOLDOWN):
                         status = "Flipping..."
                         is_flipping = True
                         stabilizing_since = None
@@ -153,7 +153,7 @@ def main():
 
                     if not is_flipping and status not in ["Saved!", "OCR Queued"]:
                         status = "Ready"
-                    elif status == "Saved!" and (time.time() - last_capture_time > COOLDOWN_SECONDS):
+                    elif status == "Saved!" and (time.time() - last_capture_time > USER_COOLDOWN):
                         status = "Ready"
 
                 font = cv2.FONT_HERSHEY_SIMPLEX
