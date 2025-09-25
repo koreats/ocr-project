@@ -6,6 +6,12 @@ import queue
 import easyocr
 import time
 import textwrap
+import tkinter as tk
+from tkinter import scrolledtext
+
+# --- Global flag for shutdown ---
+is_running = True
+# --------------------------------
 
 def find_capture_device():
     for i in range(3):
@@ -16,51 +22,47 @@ def find_capture_device():
     return None
 
 def post_process_text(ocr_result):
-    """
-    Groups OCR results into paragraphs, then word-wraps each paragraph.
-    """
-    # Step 1: Group lines into paragraphs
     paragraphs = []
     current_paragraph = ""
     for item in ocr_result:
         line = item[1].strip()
         current_paragraph += line + " "
-        # If a line ends with sentence-ending punctuation, we consider it the end of a paragraph.
         if line.endswith(('.', '?', '!', ':')):
             paragraphs.append(current_paragraph.strip())
             current_paragraph = ""
-    # Add any remaining text as the last paragraph
     if current_paragraph:
         paragraphs.append(current_paragraph.strip())
-
-    # Step 2: Word-wrap each paragraph individually
     wrapper = textwrap.TextWrapper(width=70, break_long_words=False, replace_whitespace=False)
     wrapped_paragraphs = [wrapper.fill(p) for p in paragraphs]
-
-    # Step 3: Join the wrapped paragraphs with a blank line in between
     return "\n\n".join(wrapped_paragraphs)
 
 def ocr_worker(job_q, result_q, reader):
-    """
-    Worker thread that performs OCR and post-processes the result.
-    """
     while True:
-        frame = job_q.get()
-        if frame is None: break
         try:
-            result = reader.readtext(frame)
-            if not result:
-                result_q.put("[No text found]")
-                continue
+            frame = job_q.get(timeout=1) # Use timeout to prevent blocking forever
+            if frame is None: break
+            try:
+                result = reader.readtext(frame)
+                if not result:
+                    result_q.put("[No text found]")
+                    continue
+                formatted_text = post_process_text(result)
+                result_q.put(formatted_text)
+            except Exception as e:
+                print(f"EasyOCR 작업 중 오류 발생: {e}")
+                result_q.put(f"[OCR Error: {e}]")
+            finally:
+                job_q.task_done()
+        except queue.Empty:
+            if not is_running:
+                break
 
-            # Apply advanced post-processing
-            formatted_text = post_process_text(result)
-            result_q.put(formatted_text)
-        except Exception as e:
-            print(f"EasyOCR 작업 중 오류 발생: {e}")
-            result_q.put(f"[OCR Error: {e}]")
-        finally:
-            job_q.task_done()
+def on_key_press(event):
+    """Handles key press events for the Tkinter window."""
+    global is_running
+    if event.keysym == 'Escape' or event.keysym == 'q':
+        print("'q' 또는 'ESC' 키가 입력되어 프로그램을 종료합니다.")
+        is_running = False
 
 def main():
     cap = find_capture_device()
@@ -85,39 +87,42 @@ def main():
     ocr_thread = threading.Thread(target=ocr_worker, args=(job_queue, result_queue, reader), daemon=True)
     ocr_thread.start()
 
+    root = tk.Tk()
+    root.title("OCR 결과")
+    root.geometry("600x400")
+    text_area = scrolledtext.ScrolledText(root, wrap=tk.WORD, font=("Helvetica", 14))
+    text_area.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+    # Bind the key press event to the root window
+    root.bind("<KeyPress>", on_key_press)
+
     window_title = "OCR Application (Final)"
     cv2.namedWindow(window_title)
 
-    # --- App Variables & UI ---
-    status = "Ready"
-    is_flipping = False
+    status, is_flipping, mean_diff, last_capture_time, stabilizing_since = "Ready", False, 0.0, 0, None
+    page_counter = 0
     previous_frame_gray = None
-    mean_diff = 0.0
-    last_capture_time = 0
-    stabilizing_since = None
-    USER_COOLDOWN = 0.4 # Reduced from 1.5 for faster cycle
-    STABILIZATION_DELAY = 0.5
+    USER_COOLDOWN, STABILIZATION_DELAY = 0.4, 0.5
 
     STATUS_COLORS = {
-        "Ready": (0, 255, 0),          # Green
-        "Flipping...": (0, 255, 255),   # Yellow
-        "Stabilizing...": (255, 255, 0),# Cyan
-        "OCR Queued": (255, 0, 0),      # Blue
-        "Saved!": (255, 0, 255)         # Magenta
+        "Ready": (0, 255, 0), "Flipping...": (0, 255, 255), "Stabilizing...": (255, 255, 0),
+        "OCR Queued": (255, 0, 0), "Saved!": (255, 0, 255)
     }
-    # -------------------------
 
     try:
         with open("output.txt", "a", encoding="utf-8") as output_file:
-            while True:
+            while is_running:
                 ret, frame = cap.read()
                 if not ret: break
 
                 try:
                     ocr_text = result_queue.get_nowait()
+                    page_counter += 1
+                    ui_output = f"--- Page {page_counter} ---\n{ocr_text}\n\n"
+                    text_area.insert(tk.END, ui_output)
+                    text_area.see(tk.END)
                     output_file.write(ocr_text + "\n\n")
                     output_file.flush()
-                    print("OCR result saved to output.txt")
+                    print(f"Page {page_counter} processed and saved.")
                     last_capture_time = time.time()
                     status = "Saved!"
                     result_queue.task_done()
@@ -138,41 +143,35 @@ def main():
 
                     if is_flipping:
                         if mean_diff == 0.0:
-                            if stabilizing_since is None:
-                                stabilizing_since = time.time()
-                                status = "Stabilizing..."
-                        else:
-                            stabilizing_since = None
-                            status = "Flipping..."
+                            if stabilizing_since is None: stabilizing_since = time.time(); status = "Stabilizing..."
+                        else: stabilizing_since = None; status = "Flipping..."
                         
                         if stabilizing_since is not None and (time.time() - stabilizing_since > STABILIZATION_DELAY):
-                            job_queue.put(frame.copy())
-                            status = "OCR Queued"
-                            is_flipping = False
-                            stabilizing_since = None
+                            job_queue.put(frame.copy()); status = "OCR Queued"; is_flipping = False; stabilizing_since = None
 
-                    if not is_flipping and status not in ["Saved!", "OCR Queued"]:
-                        status = "Ready"
-                    elif status == "Saved!" and (time.time() - last_capture_time > USER_COOLDOWN):
-                        status = "Ready"
+                    if not is_flipping and status not in ["Saved!", "OCR Queued"]: status = "Ready"
+                    elif status == "Saved!" and (time.time() - last_capture_time > USER_COOLDOWN): status = "Ready"
 
                 font = cv2.FONT_HERSHEY_SIMPLEX
                 status_color = STATUS_COLORS.get(status, (0, 0, 255))
                 cv2.putText(frame, f"Status: {status}", (10, 30), font, 0.8, status_color, 2, cv2.LINE_AA)
-                cv2.putText(frame, f"Difference: {mean_diff:.2f}", (10, 70), font, 0.8, (255,255,255), 2, cv2.LINE_AA)
-
                 cv2.imshow(window_title, frame)
                 previous_frame_gray = gray.copy()
 
-                if cv2.waitKey(1) & 0xFF == ord('q'): break
+                root.update()
+                root.update_idletasks()
+
+                cv2.waitKey(1)
     finally:
-        print("프로그램 종료 중... 마지막 OCR 작업을 완료하고 있습니다. 잠시만 기다려 주세요.")
+        print("프로그램 종료 중...")
         job_queue.put(None)
         ocr_thread.join(timeout=5)
-        if ocr_thread.is_alive():
-            print("경고: OCR 스레드가 시간 내에 종료되지 않았습니다.")
         cap.release()
         cv2.destroyAllWindows()
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass # Window might already be closed
         print("모든 리소스를 해제하고 프로그램을 종료합니다.")
 
 if __name__ == "__main__":
