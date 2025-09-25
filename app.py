@@ -8,6 +8,7 @@ import time
 import textwrap
 import json
 import os
+import fitz  # PyMuPDF
 from PIL import Image
 from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QDialog, QFormLayout, QLineEdit, QCheckBox, QDialogButtonBox, QMessageBox, QFileDialog
 from PyQt6.QtGui import QGuiApplication
@@ -50,7 +51,13 @@ def post_process_text(ocr_result, wrapper, correction_dict):
             current_paragraph = ""
     if current_paragraph:
         paragraphs.append(current_paragraph.strip())
-    corrected_paragraphs = [p.replace(err, corr) for p in paragraphs for err, corr in correction_dict.items()]
+    
+    corrected_paragraphs = []
+    for p in paragraphs:
+        for error, correction in correction_dict.items():
+            p = p.replace(error, correction)
+        corrected_paragraphs.append(p)
+
     wrapper.width = main_config.get('text_wrap_width', 70)
     wrapped_paragraphs = [wrapper.fill(p) for p in corrected_paragraphs]
     return "\n\n".join(wrapped_paragraphs)
@@ -191,22 +198,55 @@ class MainWindow(QMainWindow):
         is_running = False
         event.accept()
 
-def main():
-    global is_running, main_config
-    mode = ""
-    while mode not in ['1', '2']:
-        mode = input("어떤 모드로 실행하시겠습니까? (1: 실시간 OCR, 2: 이미지 저장): ")
-    mode = 'ocr' if mode == '1' else 'image'
-    print(f"{mode.upper()} 모드로 실행합니다.")
+def process_pdf_mode(config):
+    pdf_path = input("처리할 PDF 파일의 경로를 입력하세요: ").strip()
+    if not os.path.exists(pdf_path):
+        print(f"오류: 파일을 찾을 수 없습니다 - {pdf_path}"); return
+
+    print("EasyOCR 모델을 로드하는 중입니다...")
+    reader = easyocr.Reader(config['ocr_languages'], gpu=config['gpu_enabled'])
+    print("EasyOCR 모델 로드 완료.")
+    correction_dict = load_corrections("corrections.txt")
+    wrapper = textwrap.TextWrapper(width=config['text_wrap_width'], break_long_words=False, replace_whitespace=False)
 
     try:
-        with open("config.json", "r", encoding="utf-8") as f: main_config = json.load(f)
-    except FileNotFoundError:
-        main_config = {
-            "ocr_languages": ["ko", "en"], "gpu_enabled": True, "motion_threshold": 0.1,
-            "stabilization_delay_seconds": 0.5, "stability_threshold_frames": 5,
-            "user_cooldown_seconds": 0.4, "text_wrap_width": 70
-        }
+        doc = fitz.open(pdf_path)
+        print(f"총 {len(doc)} 페이지의 PDF 파일을 처리합니다...")
+        full_text = ""
+        for i, page in enumerate(doc):
+            print(f"- {i+1}/{len(doc)} 페이지 처리 중...")
+            pix = page.get_pixmap(dpi=300)
+            img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+            if pix.n == 4: img_data = cv2.cvtColor(img_data, cv2.COLOR_BGRA2BGR)
+            
+            result = reader.readtext(img_data)
+            if result:
+                page_text = post_process_text(result, wrapper, correction_dict)
+                full_text += page_text + "\n\n"
+
+        output_filename = os.path.splitext(os.path.basename(pdf_path))[0] + "_output.txt"
+        with open(output_filename, "w", encoding="utf-8") as f:
+            f.write(full_text)
+        print(f"\nPDF 처리 완료! 결과가 '{output_filename}' 파일에 저장되었습니다.")
+    except Exception as e:
+        print(f"PDF 처리 중 오류가 발생했습니다: {e}")
+
+def live_capture_mode(config, mode):
+    global is_running, main_config
+    main_config = config
+    app = QApplication(sys.argv)
+    main_window = None
+    if mode == 'ocr':
+        correction_dict = load_corrections("corrections.txt")
+        wrapper = textwrap.TextWrapper(width=config['text_wrap_width'], break_long_words=False, replace_whitespace=False)
+        job_queue = queue.Queue(); result_queue = queue.Queue()
+        reader = easyocr.Reader(config['ocr_languages'], gpu=config['gpu_enabled'])
+        ocr_thread = threading.Thread(target=ocr_worker, args=(job_queue, result_queue, reader, wrapper, correction_dict), daemon=True); ocr_thread.start()
+        main_window = MainWindow(config)
+        main_window.show()
+    else: # Image mode
+        saved_image_paths = []
+        if not os.path.exists('captures'): os.makedirs('captures')
 
     cap = find_capture_device()
     if cap is None: sys.exit(1)
@@ -223,27 +263,9 @@ def main():
     if roi_w == 0 or roi_h == 0: print("경고: ROI가 선택되지 않았습니다. 전체 화면으로 진행합니다."); roi_x, roi_y, roi_w, roi_h = 0, 0, int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"관심 영역 선택 완료: x={roi_x}, y={roi_y}, w={roi_w}, h={roi_h}")
 
-    app = QApplication(sys.argv)
-    main_window = None
-    if mode == 'ocr':
-        print("EasyOCR 모델을 로드하는 중입니다...")
-        reader = easyocr.Reader(main_config['ocr_languages'], gpu=main_config['gpu_enabled'])
-        print(f"EasyOCR 모델 로드 완료. [실행 장치: {reader.device}]")
-        correction_dict = load_corrections("corrections.txt")
-        wrapper = textwrap.TextWrapper(width=main_config['text_wrap_width'], break_long_words=False, replace_whitespace=False)
-        job_queue = queue.Queue(); result_queue = queue.Queue()
-        ocr_thread = threading.Thread(target=ocr_worker, args=(job_queue, result_queue, reader, wrapper, correction_dict), daemon=True); ocr_thread.start()
-        main_window = MainWindow(main_config)
-        main_window.show()
-    else: # Image mode
-        saved_image_paths = []
-        if not os.path.exists('captures'): os.makedirs('captures')
-
     window_title = "OCR Application"; cv2.namedWindow(window_title)
-
     status, is_flipping, mean_diff, last_capture_time, stabilizing_since = "Ready", False, 0.0, 0, None
     page_counter, previous_frame_gray = 0, None
-
     STATUS_COLORS = {
         "Ready": (0, 255, 0), "Flipping...": (0, 255, 255), "Stabilizing...": (255, 255, 0),
         "OCR Queued": (255, 0, 0), "Saved!": (255, 0, 255), "Image Saved!": (0, 165, 255)
@@ -254,9 +276,7 @@ def main():
             while is_running:
                 ret, frame = cap.read()
                 if not ret: break
-
                 cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 0), 2)
-
                 if mode == 'ocr':
                     try:
                         ocr_text = result_queue.get_nowait()
@@ -275,19 +295,17 @@ def main():
 
                 if previous_frame_gray is not None:
                     diff = cv2.absdiff(previous_frame_gray, gray); mean_diff = np.mean(diff)
-
-                    if mean_diff > main_config['motion_threshold'] and not is_flipping and (time.time() - last_capture_time > main_config['user_cooldown_seconds']):
+                    if mean_diff > config['motion_threshold'] and not is_flipping and (time.time() - last_capture_time > config['user_cooldown_seconds']):
                         status = "Flipping..."; is_flipping = True; stabilizing_since = None
-
                     if is_flipping:
                         if mean_diff == 0.0:
                             if stabilizing_since is None: stabilizing_since = time.time(); status = "Stabilizing..."
                         else: stabilizing_since = None; status = "Flipping..."
-                        if stabilizing_since is not None and (time.time() - stabilizing_since > main_config['stabilization_delay_seconds']):
+                        if stabilizing_since is not None and (time.time() - stabilizing_since > config['stabilization_delay_seconds']):
                             roi_to_capture = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
                             if mode == 'ocr':
                                 job_queue.put(roi_to_capture.copy()); status = "OCR Queued"
-                            else: # Image mode
+                            else:
                                 page_counter += 1
                                 filename = f"captures/capture_{page_counter:04d}.png"
                                 cv2.imwrite(filename, roi_to_capture)
@@ -296,10 +314,9 @@ def main():
                                 status = "Image Saved!"
                                 last_capture_time = time.time()
                             is_flipping = False; stabilizing_since = None
-
                     current_status_key = status.split('!')[0] + '!' if '!' in status else status
                     if not is_flipping and current_status_key not in ["Saved!", "OCR Queued", "Image Saved!"]: status = "Ready"
-                    elif status in ["Saved!", "Image Saved!"] and (time.time() - last_capture_time > main_config['user_cooldown_seconds']):
+                    elif status in ["Saved!", "Image Saved!"] and (time.time() - last_capture_time > config['user_cooldown_seconds']):
                         status = "Ready"
 
                 cv2.putText(frame, f"Status: {status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, STATUS_COLORS.get(status, (0,0,255)), 2, cv2.LINE_AA)
@@ -309,10 +326,9 @@ def main():
                 if mode == 'ocr': app.processEvents()
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'): is_running = False
-
     finally:
         print("프로그램 종료 중...")
-        if mode == 'ocr':
+        if mode == 'ocr' and 'job_queue' in locals():
             job_queue.put(None)
             ocr_thread.join(timeout=5)
         elif mode == 'image' and saved_image_paths:
@@ -328,6 +344,28 @@ def main():
         cap.release(); cv2.destroyAllWindows()
         if mode == 'ocr': app.quit()
         print("모든 리소스를 해제하고 프로그램을 종료합니다.")
+
+
+def main():
+    global is_running, main_config
+    mode_choice = ""
+    while mode_choice not in ['1', '2', '3']:
+        mode_choice = input("어떤 모드로 실행하시겠습니까? (1: 실시간 OCR, 2: 이미지 저장, 3: PDF 처리): ").strip().lower()
+    
+    try:
+        with open("config.json", "r", encoding="utf-8") as f: main_config = json.load(f)
+    except FileNotFoundError:
+        main_config = {
+            "ocr_languages": ["ko", "en"], "gpu_enabled": True, "motion_threshold": 0.1,
+            "stabilization_delay_seconds": 0.5, "stability_threshold_frames": 5,
+            "user_cooldown_seconds": 0.4, "text_wrap_width": 70
+        }
+
+    if mode_choice == '3':
+        process_pdf_mode(main_config)
+    else:
+        mode = 'ocr' if mode_choice == '1' else 'image'
+        live_capture_mode(main_config, mode)
 
 if __name__ == "__main__":
     main()
