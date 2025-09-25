@@ -5,6 +5,7 @@ import threading
 import queue
 import easyocr
 import time
+import textwrap
 
 def find_capture_device():
     for i in range(3):
@@ -14,14 +15,47 @@ def find_capture_device():
             return cap
     return None
 
+def post_process_text(ocr_result):
+    """
+    Groups OCR results into paragraphs, then word-wraps each paragraph.
+    """
+    # Step 1: Group lines into paragraphs
+    paragraphs = []
+    current_paragraph = ""
+    for item in ocr_result:
+        line = item[1].strip()
+        current_paragraph += line + " "
+        # If a line ends with sentence-ending punctuation, we consider it the end of a paragraph.
+        if line.endswith(('.', '?', '!', ':')):
+            paragraphs.append(current_paragraph.strip())
+            current_paragraph = ""
+    # Add any remaining text as the last paragraph
+    if current_paragraph:
+        paragraphs.append(current_paragraph.strip())
+
+    # Step 2: Word-wrap each paragraph individually
+    wrapper = textwrap.TextWrapper(width=70, break_long_words=False, replace_whitespace=False)
+    wrapped_paragraphs = [wrapper.fill(p) for p in paragraphs]
+
+    # Step 3: Join the wrapped paragraphs with a blank line in between
+    return "\n\n".join(wrapped_paragraphs)
+
 def ocr_worker(job_q, result_q, reader):
+    """
+    Worker thread that performs OCR and post-processes the result.
+    """
     while True:
         frame = job_q.get()
         if frame is None: break
         try:
             result = reader.readtext(frame)
-            text = "\n".join([item[1] for item in result])
-            result_q.put(text)
+            if not result:
+                result_q.put("[No text found]")
+                continue
+
+            # Apply advanced post-processing
+            formatted_text = post_process_text(result)
+            result_q.put(formatted_text)
         except Exception as e:
             print(f"EasyOCR 작업 중 오류 발생: {e}")
             result_q.put(f"[OCR Error: {e}]")
@@ -97,7 +131,6 @@ def main():
                     diff = cv2.absdiff(previous_frame_gray, gray)
                     mean_diff = np.mean(diff)
 
-                    # --- Final State Machine ---
                     if mean_diff > 0.1 and not is_flipping and (time.time() - last_capture_time > COOLDOWN_SECONDS):
                         status = "Flipping..."
                         is_flipping = True
@@ -122,10 +155,9 @@ def main():
                         status = "Ready"
                     elif status == "Saved!" and (time.time() - last_capture_time > COOLDOWN_SECONDS):
                         status = "Ready"
-                    # ---------------------------
 
                 font = cv2.FONT_HERSHEY_SIMPLEX
-                status_color = STATUS_COLORS.get(status, (0, 0, 255)) # Default to Red if status is unknown
+                status_color = STATUS_COLORS.get(status, (0, 0, 255))
                 cv2.putText(frame, f"Status: {status}", (10, 30), font, 0.8, status_color, 2, cv2.LINE_AA)
                 cv2.putText(frame, f"Difference: {mean_diff:.2f}", (10, 70), font, 0.8, (255,255,255), 2, cv2.LINE_AA)
 
@@ -134,13 +166,11 @@ def main():
 
                 if cv2.waitKey(1) & 0xFF == ord('q'): break
     finally:
-        print("프로그램 종료 중... OCR 스레드에 종료 신호를 보냅니다.")
-        job_queue.put(None)      # Signal the worker to stop
-        ocr_thread.join(timeout=5) # Wait up to 5 seconds for the thread to finish
-        
+        print("프로그램 종료 중... 마지막 OCR 작업을 완료하고 있습니다. 잠시만 기다려 주세요.")
+        job_queue.put(None)
+        ocr_thread.join(timeout=5)
         if ocr_thread.is_alive():
             print("경고: OCR 스레드가 시간 내에 종료되지 않았습니다.")
-
         cap.release()
         cv2.destroyAllWindows()
         print("모든 리소스를 해제하고 프로그램을 종료합니다.")
