@@ -134,6 +134,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config; self.mode = mode
         self.pdf_saved_this_session = False
+        self.is_going_back = False # Flag to indicate returning to mode selection
         self.setWindowTitle("OCR Application")
         self.setGeometry(100, 100, 1200, 700)
         central_widget = QWidget(); self.setCentralWidget(central_widget)
@@ -150,14 +151,18 @@ class MainWindow(QMainWindow):
         self.save_as_button = QPushButton("텍스트 파일로 저장"); self.pdf_button = QPushButton("PDF로 저장")
         self.finish_scan_button = QPushButton("스캔 완료 및 파일 생성")
         self.settings_button = QPushButton("설정")
+        self.back_button = QPushButton("모드 선택으로") # New button
         button_layout.addWidget(self.copy_button); button_layout.addWidget(self.clear_button); button_layout.addWidget(self.save_as_button); button_layout.addWidget(self.pdf_button)
         button_layout.addWidget(self.finish_scan_button)
-        button_layout.addStretch(); button_layout.addWidget(self.settings_button)
+        button_layout.addStretch();
+        button_layout.addWidget(self.back_button) # Add to layout
+        button_layout.addWidget(self.settings_button)
         right_layout.addLayout(button_layout)
         self.copy_button.clicked.connect(self.copy_to_clipboard); self.clear_button.clicked.connect(self.clear_text)
         self.save_as_button.clicked.connect(self.save_as); self.pdf_button.clicked.connect(self.compile_to_pdf)
         self.finish_scan_button.clicked.connect(self.finish_scan_session)
         self.settings_button.clicked.connect(self.open_settings)
+        self.back_button.clicked.connect(self.go_to_mode_selection) # Connect signal
         self.update_ui_for_mode()
 
     def update_ui_for_mode(self):
@@ -268,6 +273,10 @@ class MainWindow(QMainWindow):
             self.add_log(f"PDF 텍스트 추출 중 오류: {e}")
             QMessageBox.critical(self, "오류", f"PDF 텍스트 추출 중 오류가 발생했습니다: {e}")
 
+    def go_to_mode_selection(self):
+        self.is_going_back = True
+        self.close()
+
     def closeEvent(self, event):
         global is_running
         is_running = False
@@ -275,15 +284,16 @@ class MainWindow(QMainWindow):
 
 def live_capture_mode(config, mode, app):
     global is_running, main_config
+    is_running = True # Reset running flag for each session
     main_config = config
     main_window = MainWindow(config, mode); main_window.show()
     main_window.add_log("실시간 캡처 모드로 시작합니다.")
     cap = find_capture_device()
-    if cap is None: main_window.add_log("오류: 캡처 장치를 찾을 수 없습니다."); return
+    if cap is None: main_window.add_log("오류: 캡처 장치를 찾을 수 없습니다."); return False
     main_window.add_log(f"캡처 장치 로드 완료.")
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     ret, first_frame = cap.read()
-    if not ret: main_window.add_log("오류: 카메라 프레임을 읽을 수 없습니다."); return
+    if not ret: main_window.add_log("오류: 카메라 프레임을 읽을 수 없습니다."); return False
     roi_text_img = first_frame.copy(); cv2.putText(roi_text_img, "Draw ROI and Press ENTER", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
     roi = cv2.selectROI("ROI 선택", roi_text_img, fromCenter=False, showCrosshair=True)
     cv2.destroyWindow("ROI 선택")
@@ -300,7 +310,7 @@ def live_capture_mode(config, mode, app):
         wrapper = textwrap.TextWrapper(width=config['text_wrap_width'], break_long_words=False, replace_whitespace=False)
         job_queue = queue.Queue(); result_queue = queue.Queue()
         ocr_thread = threading.Thread(target=ocr_worker, args=(job_queue, result_queue, reader, wrapper, correction_dict), daemon=True); ocr_thread.start()
-    elif mode == 'scan': # Image mode
+    elif mode == 'scan':
         if not os.path.exists('captures'): os.makedirs('captures')
 
     status, is_flipping, mean_diff, last_capture_time = "Ready", False, 0.0, 0
@@ -366,30 +376,37 @@ def live_capture_mode(config, mode, app):
             app.processEvents()
             if cv2.waitKey(1) & 0xFF in [ord('q'), 27]: is_running = False
     finally:
-        main_window.add_log("프로그램 종료 중...")
+        main_window.add_log("캡처 세션을 종료합니다...")
         if output_file: output_file.close()
         if mode == 'ocr' and job_queue is not None:
             job_queue.put(None)
             ocr_thread.join(timeout=5)
-        elif mode == 'scan' and saved_image_paths:
+        elif mode == 'scan' and saved_image_paths and not main_window.is_going_back:
             if not main_window.pdf_saved_this_session:
-                if QMessageBox.question(main_window, "PDF 생성", f"{len(saved_image_paths)}개의 이미지를 PDF로 변환하시겠습니까?") == QMessageBox.StandardButton.Yes:
-                    main_window.compile_to_pdf()
+                if QMessageBox.question(main_window, "작업 미완료", f"아직 파일로 생성되지 않은 {len(saved_image_paths)}개의 이미지가 있습니다. 지금 PDF와 텍스트로 변환하시겠습니까?") == QMessageBox.StandardButton.Yes:
+                    main_window.finish_scan_session()
         cap.release()
-        if 'app' in locals(): app.quit()
+    return main_window.is_going_back
 
 def main():
     global is_running, main_config
     app = QApplication(sys.argv)
-    mode_dialog = ModeSelectionDialog()
-    if not mode_dialog.exec(): sys.exit(0)
-    mode_choice = mode_dialog.selected_mode
     try:
         with open("config.json", "r", encoding="utf-8") as f: main_config = json.load(f)
     except FileNotFoundError:
         main_config = { "ocr_languages": ["ko", "en"], "gpu_enabled": True, "motion_threshold": 1.5, "stabilization_delay_seconds": 0.5, "stability_threshold_frames": 5, "user_cooldown_seconds": 0.4, "text_wrap_width": 70 }
 
-    live_capture_mode(main_config, mode_choice, app)
+    while True:
+        mode_dialog = ModeSelectionDialog()
+        if not mode_dialog.exec():
+            break # User closed the dialog, exit the loop
+
+        mode_choice = mode_dialog.selected_mode
+        
+        should_restart = live_capture_mode(main_config, mode_choice, app)
+        
+        if not should_restart:
+            break # Normal exit (e.g., closing window), exit the loop
 
 if __name__ == "__main__":
     main()
