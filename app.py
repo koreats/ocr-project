@@ -10,7 +10,7 @@ import json
 import os
 import fitz  # PyMuPDF
 from PIL import Image
-from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QDialog, QFormLayout, QLineEdit, QCheckBox, QDialogButtonBox, QMessageBox, QFileDialog, QLabel, QGroupBox, QRadioButton
+from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QDialog, QFormLayout, QLineEdit, QCheckBox, QDialogButtonBox, QMessageBox, QFileDialog, QLabel, QGroupBox, QRadioButton, QGridLayout
 from PyQt6.QtGui import QGuiApplication, QImage, QPixmap
 from PyQt6.QtCore import Qt
 
@@ -74,6 +74,20 @@ def ocr_worker(job_q, result_q, reader, wrapper, correction_dict):
         finally:
             job_q.task_done()
 
+class AspectRatioLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(1, 1)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return int(width * 9 / 16)
+
 class ModeSelectionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -134,47 +148,63 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.pdf_saved_this_session = False
-        self.saved_image_paths = [] # List of captured image paths for scan mode
+        self.saved_image_paths = []
         self.setWindowTitle("OCR Application")
-        self.setGeometry(100, 100, 1200, 700)
-        central_widget = QWidget(); self.setCentralWidget(central_widget)
-        main_layout = QHBoxLayout(central_widget)
-        self.video_label = QLabel("카메라 로딩 중..."); self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter); self.video_label.setMinimumWidth(640)
-        main_layout.addWidget(self.video_label, 2)
-        right_widget = QWidget(); right_layout = QVBoxLayout(right_widget); main_layout.addWidget(right_widget, 1)
+        self.setGeometry(100, 100, 1280, 720)
 
-        # --- Mode Selection Radio Buttons ---
-        mode_groupbox = QGroupBox("모드 선택")
-        mode_layout = QHBoxLayout()
+        central_widget = QWidget(); self.setCentralWidget(central_widget)
+        grid_layout = QGridLayout(central_widget)
+
+        # --- Left Column Widgets ---
+        self.video_label = AspectRatioLabel()
+        
+        # Controls Widget (Mode + Buttons)
+        controls_widget = QWidget()
+        controls_layout = QHBoxLayout(controls_widget)
         self.ocr_radio = QRadioButton("실시간 텍스트 추출")
         self.scan_radio = QRadioButton("문서 스캔 (PDF 생성)")
-        self.ocr_radio.setChecked(True) # Default mode
-        mode_layout.addWidget(self.ocr_radio)
-        mode_layout.addWidget(self.scan_radio)
-        mode_groupbox.setLayout(mode_layout)
-        right_layout.addWidget(mode_groupbox)
-
-        self.ocr_results_area = QTextEdit(); self.ocr_results_area.setReadOnly(True); self.ocr_results_area.setFontPointSize(14)
-        self.log_area = QTextEdit(); self.log_area.setReadOnly(True); self.log_area.setMaximumHeight(100)
-        right_layout.addWidget(QLabel("OCR 결과 / 저장된 파일 목록:")); right_layout.addWidget(self.ocr_results_area)
-        right_layout.addWidget(QLabel("로그:")); right_layout.addWidget(self.log_area)
-        button_layout = QHBoxLayout()
-        self.copy_button = QPushButton("클립보드로 복사"); self.clear_button = QPushButton("내용/목록 지우기")
+        self.ocr_radio.setChecked(True)
+        self.copy_button = QPushButton("클립보드로 복사")
+        self.clear_button = QPushButton("내용/목록 지우기")
         self.save_as_button = QPushButton("텍스트 파일로 저장")
         self.finish_scan_button = QPushButton("스캔 완료 및 파일 생성")
         self.settings_button = QPushButton("설정")
-        button_layout.addWidget(self.copy_button); button_layout.addWidget(self.clear_button); button_layout.addWidget(self.save_as_button)
-        button_layout.addWidget(self.finish_scan_button)
-        button_layout.addStretch();
-        button_layout.addWidget(self.settings_button)
-        right_layout.addLayout(button_layout)
-        self.copy_button.clicked.connect(self.copy_to_clipboard); self.clear_button.clicked.connect(self.clear_text)
+        controls_layout.addWidget(self.ocr_radio)
+        controls_layout.addWidget(self.scan_radio)
+        controls_layout.addStretch()
+        controls_layout.addWidget(self.copy_button)
+        controls_layout.addWidget(self.clear_button)
+        controls_layout.addWidget(self.save_as_button)
+        controls_layout.addWidget(self.finish_scan_button)
+        controls_layout.addWidget(self.settings_button)
+
+        self.log_area = QTextEdit(); self.log_area.setReadOnly(True)
+
+        # --- Right Column Widgets ---
+        self.ocr_results_area = QTextEdit(); self.ocr_results_area.setReadOnly(True); self.ocr_results_area.setFontPointSize(14)
+
+        # --- Add Widgets to Grid ---
+        grid_layout.addWidget(self.video_label, 0, 0)
+        grid_layout.addWidget(controls_widget, 1, 0)
+        grid_layout.addWidget(self.log_area, 2, 0)
+        grid_layout.addWidget(self.ocr_results_area, 0, 1, 3, 1) # Span 3 rows
+
+        # --- Set Stretches ---
+        grid_layout.setColumnStretch(0, 2) # Left column is 2/3 of width
+        grid_layout.setColumnStretch(1, 1) # Right column is 1/3 of width
+        grid_layout.setRowStretch(0, 0)    # Video row height is driven by aspect ratio
+        grid_layout.setRowStretch(1, 0)    # Controls row height is fixed
+        grid_layout.setRowStretch(2, 1)    # Log row takes remaining space
+
+        # --- Connections and Initial State ---
+        self.copy_button.clicked.connect(self.copy_to_clipboard)
+        self.clear_button.clicked.connect(self.clear_text)
         self.save_as_button.clicked.connect(self.save_as)
         self.finish_scan_button.clicked.connect(self.finish_scan_session)
         self.settings_button.clicked.connect(self.open_settings)
         
         self.ocr_radio.toggled.connect(self._on_mode_changed)
-        self._on_mode_changed() # Call once to set initial UI state
+        self._on_mode_changed()
 
     def _on_mode_changed(self):
         self.ocr_results_area.clear()
@@ -347,6 +377,7 @@ def live_capture_mode(config, app):
     page_counter, previous_frame_gray, stability_counter = 0, None, 0
     STATUS_COLORS = { "Ready": (0, 255, 0), "Flipping...": (0, 255, 255), "Stabilizing...": (255, 255, 0), "OCR Queued": (255, 0, 0), "Saved!": (255, 0, 255), "Image Saved!": (0, 165, 255) }
     
+    output_file = None
     try:
         while is_running:
             if not main_window.isVisible(): is_running = False; continue
@@ -360,10 +391,14 @@ def live_capture_mode(config, app):
                 try:
                     ocr_text = result_queue.get_nowait()
                     if main_window.ocr_radio.isChecked():
+                        if output_file is None:
+                            output_file = open("output.txt", "a", encoding="utf-8")
+                        
                         page_counter += 1
                         ui_output = f"--- Page {page_counter} ---\n{ocr_text}"
                         main_window.add_ocr_text(ui_output)
-                        main_window.add_log(f"Page {page_counter} 처리 완료.")
+                        output_file.write(ocr_text + "\n\n"); output_file.flush()
+                        main_window.add_log(f"Page {page_counter} 처리 및 파일에 저장 완료.")
                         status = "Saved!"
                     last_capture_time = time.time()
                     result_queue.task_done()
@@ -408,6 +443,7 @@ def live_capture_mode(config, app):
             if cv2.waitKey(1) & 0xFF in [ord('q'), 27]: is_running = False
     finally:
         main_window.add_log("프로그램 종료 중...")
+        if output_file: output_file.close()
         if job_queue is not None:
             job_queue.put(None)
             ocr_thread.join(timeout=5)
