@@ -11,8 +11,8 @@ import os
 import fitz  # PyMuPDF
 from PIL import Image
 from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QDialog, QFormLayout, QLineEdit, QCheckBox, QDialogButtonBox, QMessageBox, QFileDialog, QLabel, QGroupBox, QRadioButton, QGridLayout
-from PyQt6.QtGui import QGuiApplication, QImage, QPixmap
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QGuiApplication, QImage, QPixmap, QPainter, QPen
+from PyQt6.QtCore import Qt, QRect
 
 is_running = True
 main_config = {}
@@ -75,9 +75,40 @@ def ocr_worker(job_q, result_q, reader, wrapper, correction_dict):
             job_q.task_done()
 
 class AspectRatioLabel(QLabel):
-    def __init__(self, parent=None):
+    def __init__(self, main_window_ref, parent=None):
         super().__init__(parent)
+        self.main_window = main_window_ref
         self.setMinimumSize(1, 1)
+        self.is_drawing = False
+        self.start_point = None
+        self.end_point = None
+        self.selection_rect = QRect()
+
+    def mousePressEvent(self, event):
+        if self.main_window.current_state != 'ROI_SELECTION': return
+        self.is_drawing = True
+        self.start_point = event.pos()
+        self.selection_rect = QRect(self.start_point, event.pos())
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        if self.is_drawing:
+            self.selection_rect = QRect(self.start_point, event.pos()).normalized()
+            self.update() # Trigger a repaint
+
+    def mouseReleaseEvent(self, event):
+        if self.is_drawing:
+            self.is_drawing = False
+            self.selection_rect = QRect(self.start_point, event.pos()).normalized()
+            self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.selection_rect.isNull():
+            painter = QPainter(self)
+            pen = QPen(Qt.GlobalColor.yellow, 2, Qt.PenStyle.SolidLine)
+            painter.setPen(pen)
+            painter.drawRect(self.selection_rect)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -149,6 +180,7 @@ class MainWindow(QMainWindow):
         self.config = config
         self.pdf_saved_this_session = False
         self.saved_image_paths = []
+        self.current_state = 'ROI_SELECTION' # Initial state
         self.setWindowTitle("OCR Application")
         self.setGeometry(100, 100, 1280, 720)
 
@@ -156,7 +188,7 @@ class MainWindow(QMainWindow):
         grid_layout = QGridLayout(central_widget)
 
         # --- Left Column Widgets ---
-        self.video_label = AspectRatioLabel()
+        self.video_label = AspectRatioLabel(self)
         
         # Controls Widget (Mode + Buttons)
         controls_widget = QWidget()
@@ -169,6 +201,8 @@ class MainWindow(QMainWindow):
         self.save_as_button = QPushButton("텍스트 파일로 저장")
         self.finish_scan_button = QPushButton("스캔 완료 및 파일 생성")
         self.settings_button = QPushButton("설정")
+        self.confirm_roi_button = QPushButton("영역 확정")
+
         controls_layout.addWidget(self.ocr_radio)
         controls_layout.addWidget(self.scan_radio)
         controls_layout.addStretch()
@@ -177,6 +211,7 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.save_as_button)
         controls_layout.addWidget(self.finish_scan_button)
         controls_layout.addWidget(self.settings_button)
+        controls_layout.addWidget(self.confirm_roi_button)
 
         self.log_area = QTextEdit(); self.log_area.setReadOnly(True)
 
@@ -202,23 +237,53 @@ class MainWindow(QMainWindow):
         self.save_as_button.clicked.connect(self.save_as)
         self.finish_scan_button.clicked.connect(self.finish_scan_session)
         self.settings_button.clicked.connect(self.open_settings)
+        self.confirm_roi_button.clicked.connect(self._confirm_roi)
         
         self.ocr_radio.toggled.connect(self._on_mode_changed)
-        self._on_mode_changed()
+        self._update_ui_for_state() # Set initial UI
+
+    def _update_ui_for_state(self):
+        if self.current_state == 'ROI_SELECTION':
+            self.ocr_radio.setVisible(False)
+            self.scan_radio.setVisible(False)
+            self.copy_button.setVisible(False)
+            self.clear_button.setVisible(False)
+            self.save_as_button.setVisible(False)
+            self.finish_scan_button.setVisible(False)
+            self.settings_button.setVisible(False)
+            self.confirm_roi_button.setVisible(True)
+        elif self.current_state == 'CAPTURE_MODE':
+            self.ocr_radio.setVisible(True)
+            self.scan_radio.setVisible(True)
+            self.settings_button.setVisible(True)
+            self.clear_button.setVisible(True)
+            self.confirm_roi_button.setVisible(False)
+            self._on_mode_changed() # Update buttons based on radio selection
+
+    def _confirm_roi(self):
+        if not self.video_label.selection_rect.isNull():
+            self.current_state = 'CAPTURE_MODE'
+            self.video_label.is_drawing = False # Disable further drawing
+            self.add_log("ROI 확정됨.")
+            self._update_ui_for_state()
+        else:
+            self.add_log("오류: 먼저 영역을 지정해야 합니다.")
 
     def _on_mode_changed(self):
+        if self.current_state != 'CAPTURE_MODE':
+            return
         self.ocr_results_area.clear()
         if self.ocr_radio.isChecked():
-            self.copy_button.show()
-            self.save_as_button.show()
-            self.finish_scan_button.hide()
-            # Any other OCR-specific UI setup
+            self.copy_button.setVisible(True)
+            self.save_as_button.setVisible(True)
+            self.finish_scan_button.setVisible(False)
+            self.ocr_results_area.setPlaceholderText("실시간 OCR 결과가 여기에 표시됩니다.")
         else: # Scan mode is checked
-            self.copy_button.hide()
-            self.save_as_button.hide()
-            self.finish_scan_button.show()
-            # Restore the list of captured files to the text area
+            self.copy_button.setVisible(False)
+            self.save_as_button.setVisible(False)
+            self.finish_scan_button.setVisible(True)
             self.ocr_results_area.setText("\n".join(self.saved_image_paths))
+            self.ocr_results_area.setPlaceholderText("캡처된 이미지 목록이 여기에 표시됩니다.")
 
     def update_video_frame(self, cv_img):
         rgb_image = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
@@ -357,14 +422,6 @@ def live_capture_mode(config, app):
     if cap is None: main_window.add_log("오류: 캡처 장치를 찾을 수 없습니다."); return
     main_window.add_log(f"캡처 장치 로드 완료.")
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-    ret, first_frame = cap.read()
-    if not ret: main_window.add_log("오류: 카메라 프레임을 읽을 수 없습니다."); return
-    roi_text_img = first_frame.copy(); cv2.putText(roi_text_img, "Draw ROI and Press ENTER", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
-    roi = cv2.selectROI("ROI 선택", roi_text_img, fromCenter=False, showCrosshair=True)
-    cv2.destroyWindow("ROI 선택")
-    roi_x, roi_y, roi_w, roi_h = [int(c) for c in roi]
-    if roi_w == 0 or roi_h == 0: main_window.add_log("경고: ROI가 선택되지 않았습니다. 전체 화면으로 진행합니다."); roi_x, roi_y, roi_w, roi_h = 0, 0, int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    main_window.add_log(f"관심 영역 선택 완료: x={roi_x}, y={roi_y}, w={roi_w}, h={roi_h}")
     
     correction_dict = load_corrections("corrections.txt"); main_window.add_log(f"{len(correction_dict)}개의 교정 규칙을 로드했습니다.")
     wrapper = textwrap.TextWrapper(width=config['text_wrap_width'], break_long_words=False, replace_whitespace=False)
@@ -378,67 +435,116 @@ def live_capture_mode(config, app):
     STATUS_COLORS = { "Ready": (0, 255, 0), "Flipping...": (0, 255, 255), "Stabilizing...": (255, 255, 0), "OCR Queued": (255, 0, 0), "Saved!": (255, 0, 255), "Image Saved!": (0, 165, 255) }
     
     output_file = None
+    roi_x, roi_y, roi_w, roi_h = 0, 0, 0, 0
+    is_roi_confirmed = False
+
     try:
         while is_running:
             if not main_window.isVisible(): is_running = False; continue
             ret, frame = cap.read();
             if not ret: break
             display_frame = frame.copy()
-            clean_roi_frame = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w].copy()
-            cv2.rectangle(display_frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 0), 2)
 
-            if not result_queue.empty():
-                try:
-                    ocr_text = result_queue.get_nowait()
-                    if main_window.ocr_radio.isChecked():
-                        if output_file is None:
-                            output_file = open("output.txt", "a", encoding="utf-8")
-                        
-                        page_counter += 1
-                        ui_output = f"--- Page {page_counter} ---\n{ocr_text}"
-                        main_window.add_ocr_text(ui_output)
-                        output_file.write(ocr_text + "\n\n"); output_file.flush()
-                        main_window.add_log(f"Page {page_counter} 처리 및 파일에 저장 완료.")
-                        status = "Saved!"
-                    last_capture_time = time.time()
-                    result_queue.task_done()
-                except queue.Empty:
-                    pass
+            # --- ROI Logic ---
+            if main_window.current_state == 'ROI_SELECTION':
+                status = "ROI Selection"
+            
+            elif main_window.current_state == 'CAPTURE_MODE' and not is_roi_confirmed:
+                selection_rect = main_window.video_label.selection_rect
+                if selection_rect.width() > 0 and selection_rect.height() > 0:
+                    label_size = main_window.video_label.size()
+                    frame_h, frame_w = frame.shape[:2]
+                    
+                    label_ratio = label_size.width() / label_size.height()
+                    frame_ratio = frame_w / frame_h
 
-            gray = cv2.cvtColor(clean_roi_frame, cv2.COLOR_BGR2GRAY); gray = cv2.GaussianBlur(gray, (21, 21), 0)
-            if previous_frame_gray is not None:
-                diff = cv2.absdiff(previous_frame_gray, gray); mean_diff = np.mean(diff)
-                if mean_diff > config['motion_threshold'] and not is_flipping and (time.time() - last_capture_time > config['user_cooldown_seconds']):
-                    status = "Flipping..."; is_flipping = True
-                if is_flipping:
-                    if mean_diff <= config['motion_threshold']:
-                        stability_counter += 1
-                        status = "Stabilizing..."
+                    if label_ratio > frame_ratio:
+                        scaled_h = label_size.height()
+                        scaled_w = int(scaled_h * frame_ratio)
+                        x_offset = (label_size.width() - scaled_w) / 2
+                        y_offset = 0
                     else:
-                        stability_counter = 0; status = "Flipping..."
-                    if stability_counter >= config['stability_threshold_frames']:
+                        scaled_w = label_size.width()
+                        scaled_h = int(scaled_w / frame_ratio)
+                        x_offset = 0
+                        y_offset = (label_size.height() - scaled_h) / 2
+
+                    scale_w_ratio = frame_w / scaled_w
+                    scale_h_ratio = frame_h / scaled_h
+
+                    roi_x = int((selection_rect.x() - x_offset) * scale_w_ratio)
+                    roi_y = int((selection_rect.y() - y_offset) * scale_h_ratio)
+                    roi_w = int(selection_rect.width() * scale_w_ratio)
+                    roi_h = int(selection_rect.height() * scale_h_ratio)
+                    
+                    # Clamp values to be within frame boundaries
+                    roi_x = max(0, roi_x); roi_y = max(0, roi_y)
+                    if roi_x + roi_w > frame_w: roi_w = frame_w - roi_x
+                    if roi_y + roi_h > frame_h: roi_h = frame_h - roi_y
+
+                    main_window.add_log(f"최종 ROI 확정: x={roi_x}, y={roi_y}, w={roi_w}, h={roi_h}")
+                else: # No rect drawn, use full screen
+                    roi_x, roi_y, roi_w, roi_h = 0, 0, frame_w, frame_h
+                    main_window.add_log("경고: ROI가 선택되지 않아 전체 화면으로 진행합니다.")
+                is_roi_confirmed = True
+
+            # --- Capture & Process Logic (only if ROI is confirmed) ---
+            if is_roi_confirmed:
+                cv2.rectangle(display_frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 0), 2)
+                clean_roi_frame = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w].copy()
+
+                if not result_queue.empty():
+                    try:
+                        ocr_text = result_queue.get_nowait()
                         if main_window.ocr_radio.isChecked():
-                            job_queue.put(clean_roi_frame.copy()); status = "OCR Queued"
-                        else: # Scan mode
-                            filename = f"captures/capture_{len(main_window.saved_image_paths) + 1:04d}.png"
-                            cv2.imwrite(filename, clean_roi_frame)
-                            main_window.saved_image_paths.append(filename)
-                            main_window.ocr_results_area.setText("\n".join(main_window.saved_image_paths))
-                            main_window.add_log(f"이미지 저장됨: {filename}")
-                            scan_radio_text = f"문서 스캔 (PDF 생성) ({len(main_window.saved_image_paths)}장 캡처됨)"
-                            main_window.scan_radio.setText(scan_radio_text)
-                            status = "Image Saved!"; last_capture_time = time.time()
-                        is_flipping = False; stability_counter = 0
-                current_status_key = status.split('!')[0] + '!' if '!' in status else status
-                if not is_flipping and current_status_key not in ["Saved!", "OCR Queued", "Image Saved!"]: status = "Ready"
-                elif status in ["Saved!", "Image Saved!"] and (time.time() - last_capture_time > config['user_cooldown_seconds']):
-                    status = "Ready"
+                            if output_file is None: output_file = open("output.txt", "a", encoding="utf-8")
+                            page_counter += 1
+                            ui_output = f"--- Page {page_counter} ---\n{ocr_text}"
+                            main_window.add_ocr_text(ui_output)
+                            output_file.write(ocr_text + "\n\n"); output_file.flush()
+                            main_window.add_log(f"Page {page_counter} 처리 및 파일에 저장 완료.")
+                            status = "Saved!"
+                        last_capture_time = time.time()
+                        result_queue.task_done()
+                    except queue.Empty: pass
+
+                gray = cv2.cvtColor(clean_roi_frame, cv2.COLOR_BGR2GRAY); gray = cv2.GaussianBlur(gray, (21, 21), 0)
+                if previous_frame_gray is not None:
+                    diff = cv2.absdiff(previous_frame_gray, gray); mean_diff = np.mean(diff)
+                    if mean_diff > config['motion_threshold'] and not is_flipping and (time.time() - last_capture_time > config['user_cooldown_seconds']):
+                        status = "Flipping..."; is_flipping = True
+                    if is_flipping:
+                        if mean_diff <= config['motion_threshold']:
+                            stability_counter += 1
+                            status = "Stabilizing..."
+                        else:
+                            stability_counter = 0; status = "Flipping..."
+                        if stability_counter >= config['stability_threshold_frames']:
+                            if main_window.ocr_radio.isChecked():
+                                job_queue.put(clean_roi_frame.copy()); status = "OCR Queued"
+                            else: # Scan mode
+                                filename = f"captures/capture_{len(main_window.saved_image_paths) + 1:04d}.png"
+                                cv2.imwrite(filename, clean_roi_frame)
+                                main_window.saved_image_paths.append(filename)
+                                main_window.ocr_results_area.setText("\n".join(main_window.saved_image_paths))
+                                main_window.add_log(f"이미지 저장됨: {filename}")
+                                scan_radio_text = f"문서 스캔 (PDF 생성) ({len(main_window.saved_image_paths)}장 캡처됨)"
+                                main_window.scan_radio.setText(scan_radio_text)
+                                status = "Image Saved!"; last_capture_time = time.time()
+                            is_flipping = False; stability_counter = 0
+                previous_frame_gray = gray.copy()
+
+            current_status_key = status.split('!')[0] + '!' if '!' in status else status
+            if not is_flipping and current_status_key not in ["Saved!", "OCR Queued", "Image Saved!", "영역 지정"]: status = "Ready"
+            elif status in ["Saved!", "Image Saved!"] and (time.time() - last_capture_time > config['user_cooldown_seconds']): status = "Ready"
+            
             status_color = STATUS_COLORS.get(status, (0,0,255))
             cv2.putText(display_frame, f"Status: {status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2, cv2.LINE_AA)
-            cv2.putText(display_frame, f"Difference: {mean_diff:.2f}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(display_frame, f"Stability: {stability_counter}/{config['stability_threshold_frames']}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+            if is_roi_confirmed:
+                cv2.putText(display_frame, f"Difference: {mean_diff:.2f}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(display_frame, f"Stability: {stability_counter}/{config['stability_threshold_frames']}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+            
             main_window.update_video_frame(display_frame)
-            previous_frame_gray = gray.copy()
             app.processEvents()
             if cv2.waitKey(1) & 0xFF in [ord('q'), 27]: is_running = False
     finally:
