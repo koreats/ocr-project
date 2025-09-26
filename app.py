@@ -11,7 +11,8 @@ import os
 import fitz  # PyMuPDF
 from PIL import Image
 from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QDialog, QFormLayout, QLineEdit, QCheckBox, QDialogButtonBox, QMessageBox, QFileDialog, QLabel
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtGui import QGuiApplication, QImage, QPixmap
+from PyQt6.QtCore import Qt
 
 is_running = True
 main_config = {}
@@ -101,7 +102,7 @@ class SettingsDialog(QDialog):
         self.widgets = {}
         descriptions = {
             'ocr_languages': "OCR 언어 (쉼표로 구분) *재시작 필요", 'gpu_enabled': "GPU 가속 사용 여부 *재시작 필요",
-            'motion_threshold': "움직임 감지 기준 값", 'stabilization_delay_seconds': "움직임 멈춤 후 캡처까지 대기 시간 (초)",
+            'motion_threshold': "움직임 감지 기준 값", 
             'stability_threshold_frames': "안정화로 판단하기 위한 프레임 수", 'user_cooldown_seconds': "캡처 후 다음 감지까지의 대기 시간 (초)",
             'text_wrap_width': "결과 텍스트의 한 줄 최대 글자 수"
         }
@@ -135,20 +136,23 @@ class MainWindow(QMainWindow):
         self.config = config; self.mode = mode
         self.pdf_saved_this_session = False
         self.setWindowTitle("OCR Application")
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(100, 100, 1200, 700)
         central_widget = QWidget(); self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+        self.video_label = QLabel("카메라 로딩 중..."); self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter); self.video_label.setMinimumWidth(640)
+        main_layout.addWidget(self.video_label, 2)
+        right_widget = QWidget(); right_layout = QVBoxLayout(right_widget); main_layout.addWidget(right_widget, 1)
         self.ocr_results_area = QTextEdit(); self.ocr_results_area.setReadOnly(True); self.ocr_results_area.setFontPointSize(14)
         self.log_area = QTextEdit(); self.log_area.setReadOnly(True); self.log_area.setMaximumHeight(100)
-        main_layout.addWidget(QLabel("OCR 결과 / 저장된 파일 목록:")); main_layout.addWidget(self.ocr_results_area)
-        main_layout.addWidget(QLabel("로그:")); main_layout.addWidget(self.log_area)
+        right_layout.addWidget(QLabel("OCR 결과 / 저장된 파일 목록:")); right_layout.addWidget(self.ocr_results_area)
+        right_layout.addWidget(QLabel("로그:")); right_layout.addWidget(self.log_area)
         button_layout = QHBoxLayout()
         self.copy_button = QPushButton("클립보드로 복사"); self.clear_button = QPushButton("내용/목록 지우기")
         self.save_as_button = QPushButton("텍스트 파일로 저장"); self.pdf_button = QPushButton("PDF로 저장")
         self.settings_button = QPushButton("설정")
         button_layout.addWidget(self.copy_button); button_layout.addWidget(self.clear_button); button_layout.addWidget(self.save_as_button); button_layout.addWidget(self.pdf_button)
         button_layout.addStretch(); button_layout.addWidget(self.settings_button)
-        main_layout.addLayout(button_layout)
+        right_layout.addLayout(button_layout)
         self.copy_button.clicked.connect(self.copy_to_clipboard); self.clear_button.clicked.connect(self.clear_text)
         self.save_as_button.clicked.connect(self.save_as); self.pdf_button.clicked.connect(self.compile_to_pdf)
         self.settings_button.clicked.connect(self.open_settings)
@@ -157,6 +161,14 @@ class MainWindow(QMainWindow):
     def update_ui_for_mode(self):
         if self.mode == 'ocr': self.pdf_button.setEnabled(False)
         else: self.copy_button.setEnabled(False); self.save_as_button.setEnabled(False)
+
+    def update_video_frame(self, cv_img):
+        rgb_image = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_image.shape
+        bytes_per_line = ch * w
+        qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(qt_image)
+        self.video_label.setPixmap(pixmap.scaled(self.video_label.width(), self.video_label.height(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
     def add_ocr_text(self, text): self.ocr_results_area.append(text); self.ocr_results_area.verticalScrollBar().setValue(self.ocr_results_area.verticalScrollBar().maximum())
     def add_log(self, text): self.log_area.append(text); self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
@@ -235,12 +247,14 @@ def live_capture_mode(config, mode, app):
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     ret, first_frame = cap.read()
     if not ret: main_window.add_log("오류: 카메라 프레임을 읽을 수 없습니다."); return
-    roi_text_img = first_frame.copy(); cv2.putText(roi_text_img, "Draw ROI and Press ENTER", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+    roi_text_img = first_frame.copy(); cv2.putText(roi_text_img, "Draw ROI and Press ENTER", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
     roi = cv2.selectROI("ROI 선택", roi_text_img, fromCenter=False, showCrosshair=True)
     cv2.destroyWindow("ROI 선택")
     roi_x, roi_y, roi_w, roi_h = [int(c) for c in roi]
     if roi_w == 0 or roi_h == 0: main_window.add_log("경고: ROI가 선택되지 않았습니다. 전체 화면으로 진행합니다."); roi_x, roi_y, roi_w, roi_h = 0, 0, int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     main_window.add_log(f"관심 영역 선택 완료: x={roi_x}, y={roi_y}, w={roi_w}, h={roi_h}")
+    
+    job_queue, result_queue, ocr_thread, saved_image_paths = None, None, None, []
     if mode == 'ocr':
         main_window.add_log("EasyOCR 모델을 로드하는 중입니다..."); app.processEvents()
         reader = easyocr.Reader(config['ocr_languages'], gpu=config['gpu_enabled'])
@@ -249,73 +263,83 @@ def live_capture_mode(config, mode, app):
         wrapper = textwrap.TextWrapper(width=config['text_wrap_width'], break_long_words=False, replace_whitespace=False)
         job_queue = queue.Queue(); result_queue = queue.Queue()
         ocr_thread = threading.Thread(target=ocr_worker, args=(job_queue, result_queue, reader, wrapper, correction_dict), daemon=True); ocr_thread.start()
-    else: saved_image_paths = []
-    if not os.path.exists('captures'): os.makedirs('captures')
-    window_title = "OCR Application"; cv2.namedWindow(window_title)
-    status, is_flipping, mean_diff, last_capture_time, stabilizing_since = "Ready", False, 0.0, 0, None
-    page_counter, previous_frame_gray = 0, None
+    else: # Image mode
+        if not os.path.exists('captures'): os.makedirs('captures')
+
+    status, is_flipping, mean_diff, last_capture_time = "Ready", False, 0.0, 0
+    page_counter, previous_frame_gray, stability_counter = 0, None, 0
     STATUS_COLORS = { "Ready": (0, 255, 0), "Flipping...": (0, 255, 255), "Stabilizing...": (255, 255, 0), "OCR Queued": (255, 0, 0), "Saved!": (255, 0, 255), "Image Saved!": (0, 165, 255) }
+    
+    output_file = None
     try:
-        with open("output.txt", "a", encoding="utf-8") as output_file:
-            while is_running:
-                ret, frame = cap.read();
-                if not ret: break
-                # First, crop a clean copy of the ROI before drawing on the main frame
-                clean_roi_frame = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w].copy()
-                cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 0), 2)
-                if mode == 'ocr':
-                    try:
-                        ocr_text = result_queue.get_nowait()
-                        page_counter += 1
-                        ui_output = f"--- Page {page_counter} ---\n{ocr_text}"
-                        main_window.add_ocr_text(ui_output)
-                        output_file.write(ocr_text + "\n\n"); output_file.flush()
-                        main_window.add_log(f"Page {page_counter} 처리 및 저장 완료.")
-                        last_capture_time = time.time(); status = "Saved!"
-                        result_queue.task_done()
-                    except queue.Empty:
-                        pass
-                gray = cv2.cvtColor(clean_roi_frame, cv2.COLOR_BGR2GRAY); gray = cv2.GaussianBlur(gray, (21, 21), 0)
-                if previous_frame_gray is not None:
-                    diff = cv2.absdiff(previous_frame_gray, gray); mean_diff = np.mean(diff)
-                    if mean_diff > config['motion_threshold'] and not is_flipping and (time.time() - last_capture_time > config['user_cooldown_seconds']):
-                        status = "Flipping..."; is_flipping = True; stabilizing_since = None
-                    if is_flipping:
-                        if mean_diff == 0.0:
-                            if stabilizing_since is None: stabilizing_since = time.time(); status = "Stabilizing..."
-                        else: stabilizing_since = None; status = "Flipping..."
-                        if stabilizing_since is not None and (time.time() - stabilizing_since > config['stabilization_delay_seconds']):
-                            if mode == 'ocr':
-                                job_queue.put(clean_roi_frame.copy()); status = "OCR Queued"
-                            else:
-                                page_counter += 1
-                                filename = f"captures/capture_{page_counter:04d}.png"
-                                cv2.imwrite(filename, clean_roi_frame)
-                                saved_image_paths.append(filename)
-                                main_window.add_ocr_text(f"{filename}")
-                                main_window.add_log(f"이미지 저장됨: {filename}")
-                                status = "Image Saved!"; last_capture_time = time.time()
-                            is_flipping = False; stabilizing_since = None
-                    current_status_key = status.split('!')[0] + '!' if '!' in status else status
-                    if not is_flipping and current_status_key not in ["Saved!", "OCR Queued", "Image Saved!"]: status = "Ready"
-                    elif status in ["Saved!", "Image Saved!"] and (time.time() - last_capture_time > config['user_cooldown_seconds']):
-                        status = "Ready"
-                cv2.putText(frame, f"Status: {status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, STATUS_COLORS.get(status, (0,0,255)), 2, cv2.LINE_AA)
-                cv2.imshow(window_title, frame)
-                previous_frame_gray = gray.copy()
-                app.processEvents()
-                if cv2.waitKey(1) & 0xFF in [ord('q'), 27]: is_running = False
+        if mode == 'ocr':
+            output_file = open("output.txt", "a", encoding="utf-8")
+
+        while is_running:
+            ret, frame = cap.read();
+            if not ret: break
+            display_frame = frame.copy()
+            clean_roi_frame = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w].copy()
+            cv2.rectangle(display_frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 0), 2)
+            if mode == 'ocr':
+                try:
+                    ocr_text = result_queue.get_nowait()
+                    page_counter += 1
+                    ui_output = f"--- Page {page_counter} ---\n{ocr_text}"
+                    main_window.add_ocr_text(ui_output)
+                    if output_file: output_file.write(ocr_text + "\n\n"); output_file.flush()
+                    main_window.add_log(f"Page {page_counter} 처리 및 저장 완료.")
+                    last_capture_time = time.time(); status = "Saved!"
+                    result_queue.task_done()
+                except queue.Empty:
+                    pass
+            gray = cv2.cvtColor(clean_roi_frame, cv2.COLOR_BGR2GRAY); gray = cv2.GaussianBlur(gray, (21, 21), 0)
+            if previous_frame_gray is not None:
+                diff = cv2.absdiff(previous_frame_gray, gray); mean_diff = np.mean(diff)
+                if mean_diff > config['motion_threshold'] and not is_flipping and (time.time() - last_capture_time > config['user_cooldown_seconds']):
+                    status = "Flipping..."; is_flipping = True
+                if is_flipping:
+                    if mean_diff <= config['motion_threshold']:
+                        stability_counter += 1
+                        status = "Stabilizing..."
+                    else:
+                        stability_counter = 0; status = "Flipping..."
+                    if stability_counter >= config['stability_threshold_frames']:
+                        if mode == 'ocr':
+                            job_queue.put(clean_roi_frame.copy()); status = "OCR Queued"
+                        else:
+                            page_counter += 1
+                            filename = f"captures/capture_{page_counter:04d}.png"
+                            cv2.imwrite(filename, clean_roi_frame)
+                            saved_image_paths.append(filename)
+                            main_window.add_ocr_text(f"{filename}")
+                            main_window.add_log(f"이미지 저장됨: {filename}")
+                            status = "Image Saved!"; last_capture_time = time.time()
+                        is_flipping = False; stability_counter = 0
+                current_status_key = status.split('!')[0] + '!' if '!' in status else status
+                if not is_flipping and current_status_key not in ["Saved!", "OCR Queued", "Image Saved!"]: status = "Ready"
+                elif status in ["Saved!", "Image Saved!"] and (time.time() - last_capture_time > config['user_cooldown_seconds']):
+                    status = "Ready"
+            status_color = STATUS_COLORS.get(status, (0,0,255))
+            cv2.putText(display_frame, f"Status: {status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2, cv2.LINE_AA)
+            cv2.putText(display_frame, f"Difference: {mean_diff:.2f}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(display_frame, f"Stability: {stability_counter}/{config['stability_threshold_frames']}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+            main_window.update_video_frame(display_frame)
+            previous_frame_gray = gray.copy()
+            app.processEvents()
+            if cv2.waitKey(1) & 0xFF in [ord('q'), 27]: is_running = False
     finally:
         main_window.add_log("프로그램 종료 중...")
-        if mode == 'ocr' and 'job_queue' in locals():
+        if output_file: output_file.close()
+        if mode == 'ocr' and job_queue is not None:
             job_queue.put(None)
             ocr_thread.join(timeout=5)
-        elif mode == 'image' and 'saved_image_paths' in locals() and saved_image_paths:
+        elif mode == 'image' and saved_image_paths:
             if not main_window.pdf_saved_this_session:
                 if QMessageBox.question(main_window, "PDF 생성", f"{len(saved_image_paths)}개의 이미지를 PDF로 변환하시겠습니까?") == QMessageBox.StandardButton.Yes:
                     main_window.compile_to_pdf()
-        cap.release(); cv2.destroyAllWindows()
-        app.quit()
+        cap.release()
+        if 'app' in locals(): app.quit()
 
 def main():
     global is_running, main_config
@@ -326,10 +350,11 @@ def main():
     try:
         with open("config.json", "r", encoding="utf-8") as f: main_config = json.load(f)
     except FileNotFoundError:
-        main_config = { "ocr_languages": ["ko", "en"], "gpu_enabled": True, "motion_threshold": 0.1, "stabilization_delay_seconds": 0.5, "stability_threshold_frames": 5, "user_cooldown_seconds": 0.4, "text_wrap_width": 70 }
+        main_config = { "ocr_languages": ["ko", "en"], "gpu_enabled": True, "motion_threshold": 1.5, "stabilization_delay_seconds": 0.5, "stability_threshold_frames": 5, "user_cooldown_seconds": 0.4, "text_wrap_width": 70 }
 
     if mode_choice == 'pdf':
         process_pdf_mode(main_config, app)
+        sys.exit(0)
     else:
         live_capture_mode(main_config, mode_choice, app)
 
