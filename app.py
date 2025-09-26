@@ -10,7 +10,7 @@ import json
 import os
 import fitz  # PyMuPDF
 from PIL import Image
-from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QDialog, QFormLayout, QLineEdit, QCheckBox, QDialogButtonBox, QMessageBox, QFileDialog, QLabel
+from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QDialog, QFormLayout, QLineEdit, QCheckBox, QDialogButtonBox, QMessageBox, QFileDialog, QLabel, QGroupBox, QRadioButton
 from PyQt6.QtGui import QGuiApplication, QImage, QPixmap
 from PyQt6.QtCore import Qt
 
@@ -130,11 +130,11 @@ class SettingsDialog(QDialog):
         super().accept()
 
 class MainWindow(QMainWindow):
-    def __init__(self, config, mode):
+    def __init__(self, config):
         super().__init__()
-        self.config = config; self.mode = mode
+        self.config = config
         self.pdf_saved_this_session = False
-        self.is_going_back = False # Flag to indicate returning to mode selection
+        self.saved_image_paths = [] # List of captured image paths for scan mode
         self.setWindowTitle("OCR Application")
         self.setGeometry(100, 100, 1200, 700)
         central_widget = QWidget(); self.setCentralWidget(central_widget)
@@ -142,42 +142,53 @@ class MainWindow(QMainWindow):
         self.video_label = QLabel("카메라 로딩 중..."); self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter); self.video_label.setMinimumWidth(640)
         main_layout.addWidget(self.video_label, 2)
         right_widget = QWidget(); right_layout = QVBoxLayout(right_widget); main_layout.addWidget(right_widget, 1)
+
+        # --- Mode Selection Radio Buttons ---
+        mode_groupbox = QGroupBox("모드 선택")
+        mode_layout = QHBoxLayout()
+        self.ocr_radio = QRadioButton("실시간 텍스트 추출")
+        self.scan_radio = QRadioButton("문서 스캔 (PDF 생성)")
+        self.ocr_radio.setChecked(True) # Default mode
+        mode_layout.addWidget(self.ocr_radio)
+        mode_layout.addWidget(self.scan_radio)
+        mode_groupbox.setLayout(mode_layout)
+        right_layout.addWidget(mode_groupbox)
+
         self.ocr_results_area = QTextEdit(); self.ocr_results_area.setReadOnly(True); self.ocr_results_area.setFontPointSize(14)
         self.log_area = QTextEdit(); self.log_area.setReadOnly(True); self.log_area.setMaximumHeight(100)
         right_layout.addWidget(QLabel("OCR 결과 / 저장된 파일 목록:")); right_layout.addWidget(self.ocr_results_area)
         right_layout.addWidget(QLabel("로그:")); right_layout.addWidget(self.log_area)
         button_layout = QHBoxLayout()
         self.copy_button = QPushButton("클립보드로 복사"); self.clear_button = QPushButton("내용/목록 지우기")
-        self.save_as_button = QPushButton("텍스트 파일로 저장"); self.pdf_button = QPushButton("PDF로 저장")
+        self.save_as_button = QPushButton("텍스트 파일로 저장")
         self.finish_scan_button = QPushButton("스캔 완료 및 파일 생성")
         self.settings_button = QPushButton("설정")
-        self.back_button = QPushButton("모드 선택으로") # New button
-        button_layout.addWidget(self.copy_button); button_layout.addWidget(self.clear_button); button_layout.addWidget(self.save_as_button); button_layout.addWidget(self.pdf_button)
+        button_layout.addWidget(self.copy_button); button_layout.addWidget(self.clear_button); button_layout.addWidget(self.save_as_button)
         button_layout.addWidget(self.finish_scan_button)
         button_layout.addStretch();
-        button_layout.addWidget(self.back_button) # Add to layout
         button_layout.addWidget(self.settings_button)
         right_layout.addLayout(button_layout)
         self.copy_button.clicked.connect(self.copy_to_clipboard); self.clear_button.clicked.connect(self.clear_text)
-        self.save_as_button.clicked.connect(self.save_as); self.pdf_button.clicked.connect(self.compile_to_pdf)
+        self.save_as_button.clicked.connect(self.save_as)
         self.finish_scan_button.clicked.connect(self.finish_scan_session)
         self.settings_button.clicked.connect(self.open_settings)
-        self.back_button.clicked.connect(self.go_to_mode_selection) # Connect signal
-        self.update_ui_for_mode()
+        
+        self.ocr_radio.toggled.connect(self._on_mode_changed)
+        self._on_mode_changed() # Call once to set initial UI state
 
-    def update_ui_for_mode(self):
-        if self.mode == 'ocr':
+    def _on_mode_changed(self):
+        self.ocr_results_area.clear()
+        if self.ocr_radio.isChecked():
             self.copy_button.show()
-            self.clear_button.show()
             self.save_as_button.show()
-            self.pdf_button.hide()
             self.finish_scan_button.hide()
-        elif self.mode == 'scan':
+            # Any other OCR-specific UI setup
+        else: # Scan mode is checked
             self.copy_button.hide()
-            self.clear_button.show()
             self.save_as_button.hide()
-            self.pdf_button.hide()
             self.finish_scan_button.show()
+            # Restore the list of captured files to the text area
+            self.ocr_results_area.setText("\n".join(self.saved_image_paths))
 
     def update_video_frame(self, cv_img):
         rgb_image = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
@@ -232,15 +243,26 @@ class MainWindow(QMainWindow):
         return None
 
     def finish_scan_session(self):
-        global is_running
-        is_running = False # Stop the camera loop
-        self.add_log("스캔 세션을 종료합니다. 파일 생성을 시작합니다.")
+        self.add_log("파일 생성을 시작합니다. 잠시만 기다려주세요...")
         QApplication.processEvents() # Update UI log
+
+        # Temporarily disable the finish button to prevent double-clicks
+        self.finish_scan_button.setEnabled(False)
 
         saved_pdf_path = self.compile_to_pdf()
 
         if saved_pdf_path:
             self.extract_text_from_pdf(saved_pdf_path)
+        
+        # --- Reset State ---
+        self.add_log("모든 작업 완료. 스캔 상태를 초기화합니다.")
+        self.saved_image_paths.clear()
+        self.ocr_results_area.clear()
+        self.scan_radio.setText("문서 스캔 (PDF 생성)")
+        # ---
+
+        # Re-enable the button for the next session
+        self.finish_scan_button.setEnabled(True)
 
     def extract_text_from_pdf(self, pdf_path):
         self.add_log(f"'{os.path.basename(pdf_path)}' 파일에서 텍스트 추출을 시작합니다...")
@@ -273,27 +295,40 @@ class MainWindow(QMainWindow):
             self.add_log(f"PDF 텍스트 추출 중 오류: {e}")
             QMessageBox.critical(self, "오류", f"PDF 텍스트 추출 중 오류가 발생했습니다: {e}")
 
-    def go_to_mode_selection(self):
-        self.is_going_back = True
-        self.close()
 
     def closeEvent(self, event):
         global is_running
         is_running = False
         event.accept()
 
-def live_capture_mode(config, mode, app):
+def live_capture_mode(config, app):
     global is_running, main_config
-    is_running = True # Reset running flag for each session
+    is_running = True
     main_config = config
-    main_window = MainWindow(config, mode); main_window.show()
+    main_window = MainWindow(config)
+    main_window.show()
+
+    # --- OCR Reader Pre-loading ---
+    main_window.video_label.setText("EasyOCR 모델을 로드하는 중입니다...")
+    app.processEvents()
+    try:
+        reader = easyocr.Reader(config['ocr_languages'], gpu=config['gpu_enabled'])
+        main_window.add_log(f"EasyOCR 모델 로드 완료. [실행 장치: {reader.device}]")
+    except Exception as e:
+        main_window.add_log(f"EasyOCR 모델 로드 실패: {e}")
+        QMessageBox.critical(main_window, "오류", f"EasyOCR 모델 로드에 실패했습니다. 프로그램을 종료합니다.\n{e}")
+        return
+    main_window.video_label.setText("카메라 로딩 중...")
+    app.processEvents()
+    # ---
+
     main_window.add_log("실시간 캡처 모드로 시작합니다.")
     cap = find_capture_device()
-    if cap is None: main_window.add_log("오류: 캡처 장치를 찾을 수 없습니다."); return False
+    if cap is None: main_window.add_log("오류: 캡처 장치를 찾을 수 없습니다."); return
     main_window.add_log(f"캡처 장치 로드 완료.")
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     ret, first_frame = cap.read()
-    if not ret: main_window.add_log("오류: 카메라 프레임을 읽을 수 없습니다."); return False
+    if not ret: main_window.add_log("오류: 카메라 프레임을 읽을 수 없습니다."); return
     roi_text_img = first_frame.copy(); cv2.putText(roi_text_img, "Draw ROI and Press ENTER", (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
     roi = cv2.selectROI("ROI 선택", roi_text_img, fromCenter=False, showCrosshair=True)
     cv2.destroyWindow("ROI 선택")
@@ -301,45 +336,40 @@ def live_capture_mode(config, mode, app):
     if roi_w == 0 or roi_h == 0: main_window.add_log("경고: ROI가 선택되지 않았습니다. 전체 화면으로 진행합니다."); roi_x, roi_y, roi_w, roi_h = 0, 0, int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     main_window.add_log(f"관심 영역 선택 완료: x={roi_x}, y={roi_y}, w={roi_w}, h={roi_h}")
     
-    job_queue, result_queue, ocr_thread, saved_image_paths = None, None, None, []
-    if mode == 'ocr':
-        main_window.add_log("EasyOCR 모델을 로드하는 중입니다..."); app.processEvents()
-        reader = easyocr.Reader(config['ocr_languages'], gpu=config['gpu_enabled'])
-        main_window.add_log(f"EasyOCR 모델 로드 완료. [실행 장치: {reader.device}]")
-        correction_dict = load_corrections("corrections.txt"); main_window.add_log(f"{len(correction_dict)}개의 교정 규칙을 로드했습니다.")
-        wrapper = textwrap.TextWrapper(width=config['text_wrap_width'], break_long_words=False, replace_whitespace=False)
-        job_queue = queue.Queue(); result_queue = queue.Queue()
-        ocr_thread = threading.Thread(target=ocr_worker, args=(job_queue, result_queue, reader, wrapper, correction_dict), daemon=True); ocr_thread.start()
-    elif mode == 'scan':
-        if not os.path.exists('captures'): os.makedirs('captures')
+    correction_dict = load_corrections("corrections.txt"); main_window.add_log(f"{len(correction_dict)}개의 교정 규칙을 로드했습니다.")
+    wrapper = textwrap.TextWrapper(width=config['text_wrap_width'], break_long_words=False, replace_whitespace=False)
+    job_queue = queue.Queue(); result_queue = queue.Queue()
+    ocr_thread = threading.Thread(target=ocr_worker, args=(job_queue, result_queue, reader, wrapper, correction_dict), daemon=True); ocr_thread.start()
+    
+    if not os.path.exists('captures'): os.makedirs('captures')
 
     status, is_flipping, mean_diff, last_capture_time = "Ready", False, 0.0, 0
     page_counter, previous_frame_gray, stability_counter = 0, None, 0
     STATUS_COLORS = { "Ready": (0, 255, 0), "Flipping...": (0, 255, 255), "Stabilizing...": (255, 255, 0), "OCR Queued": (255, 0, 0), "Saved!": (255, 0, 255), "Image Saved!": (0, 165, 255) }
     
-    output_file = None
     try:
-        if mode == 'ocr':
-            output_file = open("output.txt", "a", encoding="utf-8")
-
         while is_running:
+            if not main_window.isVisible(): is_running = False; continue
             ret, frame = cap.read();
             if not ret: break
             display_frame = frame.copy()
             clean_roi_frame = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w].copy()
             cv2.rectangle(display_frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 0), 2)
-            if mode == 'ocr':
+
+            if not result_queue.empty():
                 try:
                     ocr_text = result_queue.get_nowait()
-                    page_counter += 1
-                    ui_output = f"--- Page {page_counter} ---\n{ocr_text}"
-                    main_window.add_ocr_text(ui_output)
-                    if output_file: output_file.write(ocr_text + "\n\n"); output_file.flush()
-                    main_window.add_log(f"Page {page_counter} 처리 및 저장 완료.")
-                    last_capture_time = time.time(); status = "Saved!"
+                    if main_window.ocr_radio.isChecked():
+                        page_counter += 1
+                        ui_output = f"--- Page {page_counter} ---\n{ocr_text}"
+                        main_window.add_ocr_text(ui_output)
+                        main_window.add_log(f"Page {page_counter} 처리 완료.")
+                        status = "Saved!"
+                    last_capture_time = time.time()
                     result_queue.task_done()
                 except queue.Empty:
                     pass
+
             gray = cv2.cvtColor(clean_roi_frame, cv2.COLOR_BGR2GRAY); gray = cv2.GaussianBlur(gray, (21, 21), 0)
             if previous_frame_gray is not None:
                 diff = cv2.absdiff(previous_frame_gray, gray); mean_diff = np.mean(diff)
@@ -352,15 +382,16 @@ def live_capture_mode(config, mode, app):
                     else:
                         stability_counter = 0; status = "Flipping..."
                     if stability_counter >= config['stability_threshold_frames']:
-                        if mode == 'ocr':
+                        if main_window.ocr_radio.isChecked():
                             job_queue.put(clean_roi_frame.copy()); status = "OCR Queued"
-                        elif mode == 'scan':
-                            page_counter += 1
-                            filename = f"captures/capture_{page_counter:04d}.png"
+                        else: # Scan mode
+                            filename = f"captures/capture_{len(main_window.saved_image_paths) + 1:04d}.png"
                             cv2.imwrite(filename, clean_roi_frame)
-                            saved_image_paths.append(filename)
-                            main_window.add_ocr_text(f"{filename}")
+                            main_window.saved_image_paths.append(filename)
+                            main_window.ocr_results_area.setText("\n".join(main_window.saved_image_paths))
                             main_window.add_log(f"이미지 저장됨: {filename}")
+                            scan_radio_text = f"문서 스캔 (PDF 생성) ({len(main_window.saved_image_paths)}장 캡처됨)"
+                            main_window.scan_radio.setText(scan_radio_text)
                             status = "Image Saved!"; last_capture_time = time.time()
                         is_flipping = False; stability_counter = 0
                 current_status_key = status.split('!')[0] + '!' if '!' in status else status
@@ -376,17 +407,15 @@ def live_capture_mode(config, mode, app):
             app.processEvents()
             if cv2.waitKey(1) & 0xFF in [ord('q'), 27]: is_running = False
     finally:
-        main_window.add_log("캡처 세션을 종료합니다...")
-        if output_file: output_file.close()
-        if mode == 'ocr' and job_queue is not None:
+        main_window.add_log("프로그램 종료 중...")
+        if job_queue is not None:
             job_queue.put(None)
             ocr_thread.join(timeout=5)
-        elif mode == 'scan' and saved_image_paths and not main_window.is_going_back:
-            if not main_window.pdf_saved_this_session:
-                if QMessageBox.question(main_window, "작업 미완료", f"아직 파일로 생성되지 않은 {len(saved_image_paths)}개의 이미지가 있습니다. 지금 PDF와 텍스트로 변환하시겠습니까?") == QMessageBox.StandardButton.Yes:
-                    main_window.finish_scan_session()
+        if main_window.saved_image_paths and not main_window.pdf_saved_this_session:
+            if QMessageBox.question(main_window, "작업 미완료", f"아직 파일로 생성되지 않은 {len(main_window.saved_image_paths)}개의 이미지가 있습니다. 지금 PDF와 텍스트로 변환하시겠습니까?") == QMessageBox.StandardButton.Yes:
+                main_window.finish_scan_session()
         cap.release()
-    return main_window.is_going_back
+        if 'app' in locals(): app.quit()
 
 def main():
     global is_running, main_config
@@ -396,17 +425,8 @@ def main():
     except FileNotFoundError:
         main_config = { "ocr_languages": ["ko", "en"], "gpu_enabled": True, "motion_threshold": 1.5, "stabilization_delay_seconds": 0.5, "stability_threshold_frames": 5, "user_cooldown_seconds": 0.4, "text_wrap_width": 70 }
 
-    while True:
-        mode_dialog = ModeSelectionDialog()
-        if not mode_dialog.exec():
-            break # User closed the dialog, exit the loop
-
-        mode_choice = mode_dialog.selected_mode
-        
-        should_restart = live_capture_mode(main_config, mode_choice, app)
-        
-        if not should_restart:
-            break # Normal exit (e.g., closing window), exit the loop
+    # Directly run the live session with a unified UI
+    live_capture_mode(main_config, app)
 
 if __name__ == "__main__":
     main()
