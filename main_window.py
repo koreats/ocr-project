@@ -81,14 +81,17 @@ class ModeSelectionDialog(QDialog):
         self.accept()
 
 class MainWindow(QMainWindow):
-    def __init__(self, config):
+    def __init__(self, config, project_path):
         super().__init__()
         self.config = config
+        self.project_path = project_path
         self.session_path = None # To be set later
         self.pdf_saved_this_session = False
         self.saved_image_paths = []
         self.current_state = 'ROI_SELECTION' # Initial state
-        self.setWindowTitle("OCR Application")
+        
+        project_name = os.path.basename(project_path)
+        self.setWindowTitle(f"OCR Application - {project_name}")
         self.setGeometry(100, 100, 1280, 720)
 
         central_widget = QWidget(); self.setCentralWidget(central_widget)

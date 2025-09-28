@@ -54,22 +54,27 @@ def ocr_worker(job_q, result_q, reader, wrapper, correction_dict, config):
 
 
 
-def live_capture_mode(config, app):
+from project_manager import ProjectManagerDialog
+
+
+def live_capture_mode(config, app, project_path):
     global is_running, main_config
     is_running = True
     main_config = config
-    main_window = MainWindow(config)
+    
+    # Pass project_path to MainWindow
+    main_window = MainWindow(config, project_path)
     main_window.show()
 
     # --- Session Setup ---
     try:
-        output_dir = config.get('output_directory', 'output')
         session_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        session_path = os.path.join(output_dir, session_name)
+        session_path = os.path.join(project_path, session_name)
         captures_path = os.path.join(session_path, 'captures')
         os.makedirs(captures_path, exist_ok=True)
         main_window.session_path = session_path
-        main_window.add_log(f"세션을 시작합니다. 결과는 '{session_path}' 폴더에 저장됩니다.")
+        main_window.add_log(f"프로젝트 '{os.path.basename(project_path)}'에서 새 세션을 시작합니다.")
+        main_window.add_log(f"결과는 '{session_path}' 폴더에 저장됩니다.")
     except (IOError, PermissionError) as e:
         QMessageBox.critical(main_window, "폴더 생성 오류", f"세션 폴더를 생성할 수 없습니다: {e}\n프로그램을 종료합니다.")
         return
@@ -222,7 +227,8 @@ def main():
     global is_running, main_config
     app = QApplication(sys.argv)
     try:
-        with open("config.json", "r", encoding="utf-8") as f: main_config = json.load(f)
+        with open("config.json", "r", encoding="utf-8") as f:
+            main_config = json.load(f)
     except FileNotFoundError:
         main_config = { 
             "ocr_languages": ["ko", "en"], "gpu_enabled": True, "motion_threshold": 1.5, 
@@ -230,7 +236,14 @@ def main():
             "user_cooldown_seconds": 0.4, "text_wrap_width": 70, "output_directory": "output"
         }
 
-    live_capture_mode(main_config, app)
+    # Show Project Manager Dialog
+    project_dialog = ProjectManagerDialog(main_config)
+    if project_dialog.exec():
+        project_path = project_dialog.project_path
+        if project_path:
+            live_capture_mode(main_config, app, project_path)
+    
+    # app.quit() is handled implicitly by the event loop exiting
 
 if __name__ == "__main__":
     main()
