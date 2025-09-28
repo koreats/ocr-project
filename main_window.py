@@ -9,13 +9,14 @@ from PIL import Image
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout, QHBoxLayout, QWidget,
     QDialog, QFormLayout, QLineEdit, QCheckBox, QDialogButtonBox, QMessageBox,
-    QFileDialog, QLabel, QRadioButton, QGridLayout
+    QFileDialog, QLabel, QRadioButton, QGridLayout, QTabWidget, QListWidget
 )
 from PyQt6.QtGui import QGuiApplication, QImage, QPixmap, QPainter, QPen
 from PyQt6.QtCore import Qt, QRect
 
 from settings_dialog import SettingsDialog
 from utils import load_corrections, post_process_text
+from project_manager import get_project_sessions, load_session_data
 
 class AspectRatioLabel(QLabel):
     def __init__(self, main_window_ref, parent=None):
@@ -99,6 +100,7 @@ class MainWindow(QMainWindow):
 
         # --- Left Column Widgets ---
         self.video_label = AspectRatioLabel(self)
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         # Controls Widget (Mode + Buttons)
         controls_widget = QWidget()
@@ -112,6 +114,7 @@ class MainWindow(QMainWindow):
         self.finish_scan_button = QPushButton("스캔 완료 및 파일 생성")
         self.settings_button = QPushButton("설정")
         self.confirm_roi_button = QPushButton("영역 확정")
+        self.restart_button = QPushButton("새 세션 시작")
 
         controls_layout.addWidget(self.ocr_radio)
         controls_layout.addWidget(self.scan_radio)
@@ -122,8 +125,25 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.finish_scan_button)
         controls_layout.addWidget(self.settings_button)
         controls_layout.addWidget(self.confirm_roi_button)
+        controls_layout.addWidget(self.restart_button)
 
+        # --- Tab Widgets for Logs and Sessions ---
+        self.log_and_session_tabs = QTabWidget()
         self.log_area = QTextEdit(); self.log_area.setReadOnly(True)
+        self.session_list_widget = QListWidget()
+
+        log_tab = QWidget()
+        log_layout = QVBoxLayout(log_tab)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.addWidget(self.log_area)
+
+        session_tab = QWidget()
+        session_layout = QVBoxLayout(session_tab)
+        session_layout.setContentsMargins(0, 0, 0, 0)
+        session_layout.addWidget(self.session_list_widget)
+
+        self.log_and_session_tabs.addTab(log_tab, "로그")
+        self.log_and_session_tabs.addTab(session_tab, "세션 탐색기")
 
         # --- Right Column Widgets ---
         self.ocr_results_area = QTextEdit(); self.ocr_results_area.setReadOnly(True); self.ocr_results_area.setFontPointSize(14)
@@ -131,7 +151,7 @@ class MainWindow(QMainWindow):
         # --- Add Widgets to Grid ---
         grid_layout.addWidget(self.video_label, 0, 0)
         grid_layout.addWidget(controls_widget, 1, 0)
-        grid_layout.addWidget(self.log_area, 2, 0)
+        grid_layout.addWidget(self.log_and_session_tabs, 2, 0)
         grid_layout.addWidget(self.ocr_results_area, 0, 1, 3, 1) # Span 3 rows
 
         # --- Set Stretches ---
@@ -148,27 +168,100 @@ class MainWindow(QMainWindow):
         self.finish_scan_button.clicked.connect(self.finish_scan_session)
         self.settings_button.clicked.connect(self.open_settings)
         self.confirm_roi_button.clicked.connect(self._confirm_roi)
+        self.restart_button.clicked.connect(self._request_restart)
         
         self.ocr_radio.toggled.connect(self._on_mode_changed)
+        self.session_list_widget.itemDoubleClicked.connect(self._on_session_selected)
+
         self._update_ui_for_state() # Set initial UI
+        self._populate_sessions()
+
+    def _populate_sessions(self):
+        self.session_list_widget.clear()
+        sessions = get_project_sessions(self.project_path)
+        self.session_list_widget.addItems(sessions)
+
+    def _on_session_selected(self, item):
+        session_name = item.text()
+        session_path = os.path.join(self.project_path, session_name)
+        self.add_log(f"'{session_name}' 세션 데이터를 불러옵니다...")
+
+        data = load_session_data(session_path)
+        
+        self.ocr_results_area.clear()
+        if data['ocr_text']:
+            self.ocr_results_area.setText(data['ocr_text'])
+        elif data['image_files']:
+            self.ocr_results_area.setText("캡처된 이미지 목록:\n\n" + "\n".join(data['image_files']))
+        else:
+            self.ocr_results_area.setText(f"'{session_name}' 세션에 표시할 데이터가 없습니다.")
+        
+        self.current_state = 'VIEWER'
+        self._update_ui_for_state()
+        self.log_and_session_tabs.setCurrentIndex(0) # Switch back to log tab for better UX
+        self.add_log("세션 데이터 로드 완료. 현재 '뷰어 모드'입니다.")
+
+    def _request_restart(self, checked=False):
+        self.restart_requested = True
+        self.close()
+
+
+
+    def _populate_sessions(self):
+        self.session_list_widget.clear()
+        sessions = get_project_sessions(self.project_path)
+        self.session_list_widget.addItems(sessions)
+
+    def _on_session_selected(self, item):
+        session_name = item.text()
+        session_path = os.path.join(self.project_path, session_name)
+        self.add_log(f"'{session_name}' 세션 데이터를 불러옵니다...")
+
+        data = load_session_data(session_path)
+        
+        self.ocr_results_area.clear()
+        if data['ocr_text']:
+            self.ocr_results_area.setText(data['ocr_text'])
+        elif data['image_files']:
+            self.ocr_results_area.setText("캡처된 이미지 목록:\n\n" + "\n".join(data['image_files']))
+        else:
+            self.ocr_results_area.setText(f"'{session_name}' 세션에 표시할 데이터가 없습니다.")
+        
+        self.current_state = 'VIEWER'
+        self._update_ui_for_state()
+        self.log_and_session_tabs.setCurrentIndex(0) # Switch back to log tab for better UX
+        self.add_log("세션 데이터 로드 완료. 현재 '뷰어 모드'입니다.")
+
+    def _show_restart_message(self):
+        QMessageBox.information(self, "알림", "새로운 프로젝트나 세션을 시작하려면 프로그램을 재시작해주세요.")
 
     def _update_ui_for_state(self):
-        if self.current_state == 'ROI_SELECTION':
-            self.ocr_radio.setVisible(False)
-            self.scan_radio.setVisible(False)
+        is_roi_selection = self.current_state == 'ROI_SELECTION'
+        is_capture_mode = self.current_state == 'CAPTURE_MODE'
+        is_viewer_mode = self.current_state == 'VIEWER'
+
+        # --- Visibility Settings ---
+        self.confirm_roi_button.setVisible(is_roi_selection)
+        
+        self.ocr_radio.setVisible(is_capture_mode)
+        self.scan_radio.setVisible(is_capture_mode)
+        self.settings_button.setVisible(is_capture_mode)
+        self.clear_button.setVisible(is_capture_mode)
+
+        self.restart_button.setVisible(is_viewer_mode)
+        self.video_label.setVisible(not is_viewer_mode)
+
+        if is_capture_mode:
+            self._on_mode_changed() # Update buttons based on radio selection
+        elif is_viewer_mode:
+            # In viewer mode, hide capture-specific buttons and show export buttons
+            self.copy_button.setVisible(True)
+            self.save_as_button.setVisible(True)
+            self.finish_scan_button.setVisible(False)
+        else: # ROI Selection
             self.copy_button.setVisible(False)
-            self.clear_button.setVisible(False)
             self.save_as_button.setVisible(False)
             self.finish_scan_button.setVisible(False)
-            self.settings_button.setVisible(False)
-            self.confirm_roi_button.setVisible(True)
-        elif self.current_state == 'CAPTURE_MODE':
-            self.ocr_radio.setVisible(True)
-            self.scan_radio.setVisible(True)
-            self.settings_button.setVisible(True)
-            self.clear_button.setVisible(True)
-            self.confirm_roi_button.setVisible(False)
-            self._on_mode_changed() # Update buttons based on radio selection
 
     def _confirm_roi(self):
         self.current_state = 'CAPTURE_MODE'

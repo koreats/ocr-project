@@ -62,7 +62,6 @@ def live_capture_mode(config, app, project_path):
     is_running = True
     main_config = config
     
-    # Pass project_path to MainWindow
     main_window = MainWindow(config, project_path)
     main_window.show()
 
@@ -77,7 +76,7 @@ def live_capture_mode(config, app, project_path):
         main_window.add_log(f"결과는 '{session_path}' 폴더에 저장됩니다.")
     except (IOError, PermissionError) as e:
         QMessageBox.critical(main_window, "폴더 생성 오류", f"세션 폴더를 생성할 수 없습니다: {e}\n프로그램을 종료합니다.")
-        return
+        return False # Do not restart
 
     # --- OCR Reader Pre-loading ---
     main_window.video_label.setText("EasyOCR 모델을 로드하는 중입니다...")
@@ -88,16 +87,20 @@ def live_capture_mode(config, app, project_path):
     except Exception as e:
         main_window.add_log(f"EasyOCR 모델 로드 실패: {e}")
         QMessageBox.critical(main_window, "오류", f"EasyOCR 모델 로드에 실패했습니다. 프로그램을 종료합니다.\n{e}")
-        return
+        return False # Do not restart
     main_window.video_label.setText("카메라 로딩 중...")
     app.processEvents()
     # ---
 
     main_window.add_log("실시간 캡처 모드로 시작합니다.")
     cap = find_capture_device()
-    if cap is None: main_window.add_log("오류: 캡처 장치를 찾을 수 없습니다."); return
-    main_window.add_log(f"캡처 장치 로드 완료.")
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    if cap is None: 
+        main_window.add_log("오류: 캡처 장치를 찾을 수 없습니다.")
+        # We can let the user view sessions even if no camera is found
+        pass
+    else:
+        main_window.add_log(f"캡처 장치 로드 완료.")
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     
     correction_dict = load_corrections("corrections.txt"); main_window.add_log(f"{len(correction_dict)}개의 교정 규칙을 로드했습니다.")
     wrapper = textwrap.TextWrapper(width=config.get('text_wrap_width', 70), break_long_words=False, replace_whitespace=False)
@@ -113,7 +116,21 @@ def live_capture_mode(config, app, project_path):
 
     try:
         while is_running:
-            if not main_window.isVisible(): is_running = False; continue
+            if not main_window.isVisible():
+                is_running = False
+                continue
+
+            if main_window.current_state == 'VIEWER':
+                app.processEvents()
+                time.sleep(0.05) # Prevent high CPU usage in viewer mode
+                continue
+            
+            if not cap or not cap.isOpened():
+                main_window.video_label.setText("카메라를 사용할 수 없습니다.\n세션 탐색기에서 과거 세션을 확인하세요.")
+                app.processEvents()
+                time.sleep(0.05)
+                continue
+
             ret, frame = cap.read();
             if not ret: break
             display_frame = frame.copy()
@@ -220,8 +237,11 @@ def live_capture_mode(config, app, project_path):
         if job_queue is not None:
             job_queue.put(None)
             ocr_thread.join(timeout=5)
-        cap.release()
-        if 'app' in locals(): app.quit()
+        if cap and cap.isOpened():
+            cap.release()
+        
+        # Return the restart flag
+        return getattr(main_window, 'restart_requested', False)
 
 def main():
     global is_running, main_config
@@ -236,14 +256,17 @@ def main():
             "user_cooldown_seconds": 0.4, "text_wrap_width": 70, "output_directory": "output"
         }
 
-    # Show Project Manager Dialog
-    project_dialog = ProjectManagerDialog(main_config)
-    if project_dialog.exec():
-        project_path = project_dialog.project_path
-        if project_path:
-            live_capture_mode(main_config, app, project_path)
-    
-    # app.quit() is handled implicitly by the event loop exiting
+    should_restart = True
+    while should_restart:
+        project_dialog = ProjectManagerDialog(main_config)
+        if project_dialog.exec():
+            project_path = project_dialog.project_path
+            if project_path:
+                should_restart = live_capture_mode(main_config, app, project_path)
+            else:
+                should_restart = False # No project selected, exit
+        else:
+            should_restart = False # Dialog was cancelled, exit
 
 if __name__ == "__main__":
     main()
